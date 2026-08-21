@@ -4,7 +4,9 @@
 # A push to the default branch publishes to the Steam Workshop, but only when
 # the version line in the version file differs from the previous commit.
 # Bumping the version is therefore the release action; everything else merges
-# freely.
+# freely. A push that leaves the version alone but touches workshop/ sends a
+# listing update instead: title and description only, no content, no change
+# note. A workflow_dispatch from the caller forces that same listing update.
 #
 # Two manifest fields are deliberately never written:
 #
@@ -54,7 +56,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     outputs:
-      publish: ${{ steps.decide.outputs.publish }}
+      mode: ${{ steps.decide.outputs.mode }}
       version: ${{ steps.decide.outputs.version }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -144,7 +146,7 @@ jobs:
           console.log(`ok: "${item.title}", item ${id}, ${desc.length} chars of description, localized: ${found.join(" ") || "none"}`);
           NODE
 
-      - name: Decide whether this is a release
+      - name: Decide whether this is a release, a listing update, or neither
         id: decide
         env:
           VERSION_FILE: ${{ inputs.version_file }}
@@ -154,32 +156,37 @@ jobs:
           node <<'NODE'
           const fs = require("fs");
           const { execFileSync } = require("child_process");
+          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8" }); } catch { return ""; } };
           const file = process.env.VERSION_FILE;
           const re = new RegExp(process.env.VERSION_PATTERN, "m");
           const value = (text) => (text && (text.match(re) || [])[1]) || "";
 
           const now = value(fs.readFileSync(file, "utf8"));
-          let before = "";
-          try { before = value(execFileSync("git", ["show", `HEAD^:${file}`], { encoding: "utf8" })); } catch {}
+          const before = value(git(["show", `HEAD^:${file}`]));
           if (!now) { console.log(`::error::${file} has no line matching ${re}`); process.exit(1); }
+          const listingTouched = git(["diff", "--name-only", "HEAD^", "HEAD", "--", "workshop"]).trim() !== "";
 
-          const out = [`version=${now}`];
-          if (process.env.EVENT_NAME !== "push") {
-            out.push("publish=false");
+          let mode = "none";
+          if (process.env.EVENT_NAME === "workflow_dispatch") {
+            mode = "listing";
+            console.log("Manual run: updating the listing only.");
+          } else if (process.env.EVENT_NAME !== "push") {
             console.log("Not a push: validation only.");
-          } else if (now === before) {
-            out.push("publish=false");
-            console.log(`Version is still ${now}, so nothing is published.`);
-          } else {
-            out.push("publish=true");
+          } else if (now !== before) {
+            mode = "release";
             console.log(`Version went ${before || "none"} -> ${now}, publishing.`);
+          } else if (listingTouched) {
+            mode = "listing";
+            console.log(`Version is still ${now} but workshop/ changed: updating the listing only.`);
+          } else {
+            console.log(`Version is still ${now}, so nothing is published.`);
           }
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join("\n") + "\n");
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${now}\nmode=${mode}\n`);
           NODE
 
   publish:
     needs: validate
-    if: needs.validate.outputs.publish == 'true'
+    if: needs.validate.outputs.mode != 'none'
     runs-on: ubuntu-latest
     steps:
       # Full history: the change notes are built from every commit since the
@@ -224,6 +231,7 @@ jobs:
           VERSION_FILE: ${{ inputs.version_file }}
           VERSION_PATTERN: ${{ inputs.version_pattern }}
           VERSION: ${{ needs.validate.outputs.version }}
+          MODE: ${{ needs.validate.outputs.mode }}
         run: |
           set -euo pipefail
           node <<'NODE'
@@ -232,6 +240,7 @@ jobs:
           const { execFileSync } = require("child_process");
 
           const version = process.env.VERSION;
+          const release = process.env.MODE === "release";
           const versionFile = process.env.VERSION_FILE;
           const re = new RegExp(process.env.VERSION_PATTERN, "m");
 
@@ -275,20 +284,24 @@ jobs:
           const title = quotes(item.title);
           const id = String(item.publishedfileid);
 
+          // A listing update carries no content and no change note, so Steam
+          // records no new update entry: only title and description change.
           const fields = {
             appid: process.env.APP_ID,
             publishedfileid: id,
-            contentfolder: path.resolve(process.env.CONTENT_DIR),
-            previewfile: path.resolve(process.env.PREVIEW_FILE),
+            ...(release ? {
+              contentfolder: path.resolve(process.env.CONTENT_DIR),
+              previewfile: path.resolve(process.env.PREVIEW_FILE),
+            } : {}),
             title: title,
             description: description,
-            changenote: quotes(changenote).slice(0, 8000),
+            ...(release ? { changenote: quotes(changenote).slice(0, 8000) } : {}),
           };
 
           const body = Object.entries(fields).map(([k, v]) => `\t"${k}"\t"${v}"`).join("\n");
           fs.writeFileSync("item.vdf", `"workshopitem"\n{\n${body}\n}\n`);
           fs.writeFileSync("expected-description.txt", description);
-          console.log(`item ${id}, "${title}", ${description.length} chars of description, ${items.length} change note entries`);
+          console.log(`${release ? "release" : "listing update"}: item ${id}, "${title}", ${description.length} chars of description${release ? `, ${items.length} change note entries` : ""}`);
           NODE
 
       - name: Upload to the Steam Workshop

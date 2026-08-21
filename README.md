@@ -8,8 +8,12 @@ behaviour, since callers reference it by path.
 - **On every pull request**, it validates the shipping tree and the Workshop
   metadata. Nothing is uploaded.
 - **On a push to `main`**, it publishes to the Steam Workshop, but only when the
-  version line changed. Bumping the version is the release action. Everything
-  else merges without touching the Workshop.
+  version line changed. Bumping the version is the release action.
+- **On a push to `main` that leaves the version alone but changes `workshop/`**,
+  it sends a listing update: title and description only, no content upload, no
+  change note, so Steam records no new update entry. A manual run of the caller
+  (`workflow_dispatch`) forces the same listing update.
+- Everything else merges without touching the Workshop.
 
 ## What a repo needs
 
@@ -30,6 +34,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   ci:
@@ -72,7 +77,8 @@ bump: the workflow walks the history of `version_file` back to the commit that
 introduced the previous version, then lists the subjects of the non-merge
 commits after it as a BBCode `[list]`, under a `v<version>` heading. With no
 earlier bump in the history, it falls back to the subject of the last commit.
-The note is capped at Steam's 8000 characters.
+The note is capped at Steam's 8000 characters. A listing update sends no
+change note at all.
 
 ## Localized listings
 
