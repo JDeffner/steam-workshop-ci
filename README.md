@@ -21,6 +21,7 @@ behaviour, since callers reference it by path.
 mod/                        the folder uploaded verbatim
 mod/thumbnail.png           the Workshop preview, 1 MB maximum
 mod/descriptor.mod          carries version="x", the release trigger
+CHANGELOG.md                the change note for each version
 workshop/item.json          {"title": "...", "publishedfileid": "123"}
 workshop/description.bbcode the listing body, Steam BBCode, 8000 chars max
 workshop/<lang>/title.txt   optional, one localized listing per folder
@@ -42,6 +43,7 @@ jobs:
     secrets:
       STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
       STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 ```
 
 `secrets: inherit` also works and passes every secret the repo holds. Name the
@@ -72,13 +74,57 @@ skipped silently.
 
 ## Change notes
 
-The Workshop change note is built from the commits since the previous version
-bump: the workflow walks the history of `version_file` back to the commit that
-introduced the previous version, then lists the subjects of the non-merge
-commits after it as a BBCode `[list]`, under a `v<version>` heading. With no
-earlier bump in the history, it falls back to the subject of the last commit.
-The note is capped at Steam's 8000 characters. A listing update sends no
-change note at all.
+`CHANGELOG.md` at the repository root is the one source of release notes, in
+Keep a Changelog style:
+
+```markdown
+# Changelog
+
+## 1.1.0 - 2026-08-21
+### Added
+- Record Their Name asks which records to write to.
+### Fixed
+- The die no longer renders as a black blob.
+
+## 1.0.0 - 2026-08-19
+- First release.
+```
+
+A section starts at `## <version>`. The first token of that line is the
+version and everything after it (the date) is ignored. The section runs to the
+next `## ` or to the end of the file. The `### Added|Changed|Fixed|Removed`
+subsections are optional; a plain bullet list is just as good.
+
+**A release whose version has no section fails validation.** When the version
+changed, CI requires a section for exactly that version with a non-empty body,
+and says so with an `::error::` when there is none. When the version did not
+change, `CHANGELOG.md` is not looked at, so ordinary commits merge freely.
+
+The section is then converted to BBCode, prefixed with a `v<version>` line, and
+sent as the Workshop change note (capped at Steam's 8000 characters). The
+conversion is deliberately small:
+
+| Markdown | BBCode |
+|---|---|
+| `### Added` | `[b]Added[/b]` |
+| a run of `- ` or `* ` lines | one `[list]` of `[*]` items |
+| `**bold**` | `[b]bold[/b]` |
+| `_italic_`, `*italic*` | `[i]italic[/i]` |
+| `` `code` `` | the text, backticks removed |
+| `[text](url)` | `[url=url]text[/url]` |
+| a blank line | a single blank line |
+
+A listing update sends no change note at all.
+
+## Discord announcements
+
+After a successful release, and only for a release, the workflow posts one
+embed to the webhook in `DISCORD_WEBHOOK_URL`: the item title with the new
+version, a link to the Workshop page, and the changelog section as Markdown
+(Discord renders it, so the bullets survive and the `###` headings become bold
+lines), truncated at 4000 characters. Without the secret the step prints a
+notice and skips. A webhook that refuses the post only warns, since the release
+has already happened.
 
 ## Localized listings
 
@@ -130,12 +176,24 @@ reuses a session you create once on your own machine.
 These sessions expire. When a publish fails with a Steam Guard message, repeat
 the steps and replace `STEAM_CONFIG_VDF`.
 
+A third secret, `DISCORD_WEBHOOK_URL`, is optional and only drives the
+announcement. Create the webhook in the channel it should post to (Server
+settings, then Integrations, then Webhooks), copy its URL and store it:
+
+```
+gh secret set DISCORD_WEBHOOK_URL -R JDeffner/<repo> --body "<url>"
+```
+
+Anyone holding that URL can post to the channel, so keep it a secret and never
+echo it in a step.
+
 ## Trust model
 
 The workflow reads the calling repository's checkout and the two secrets. It
 sends the content folder, the preview image and the listing text to Steam
 through SteamCMD, and after a publish it reads the item back from Steam's public
-API to compare the description. It talks to nothing else.
+API to compare the description. When `DISCORD_WEBHOOK_URL` is set it also posts
+the release announcement to that webhook. It talks to nothing else.
 
 `STEAM_CONFIG_VDF` is a logged-in Steam session and grants full access to that
 account, not just to Workshop uploads. Put it only in repositories you control,
