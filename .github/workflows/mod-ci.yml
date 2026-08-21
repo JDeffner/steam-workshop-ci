@@ -1,0 +1,214 @@
+# Shared CI for the CK3 mod repos.
+#
+# Every pull request validates the shipping tree and the Workshop metadata.
+# A push to main publishes to the Steam Workshop, but only when the `version=`
+# line in mod/descriptor.mod differs from the previous commit. Bumping the
+# version is therefore the release action; everything else merges freely.
+#
+# `visibility` is deliberately never written to the manifest. Steam's manifest
+# only understands public/friends/private, and it has no value for "unlisted",
+# so writing it at all risks flipping an unlisted item public. Visibility stays
+# a manual switch in the Workshop UI.
+name: CK3 mod CI
+
+on:
+  workflow_call:
+    inputs:
+      app_id:
+        description: Steam AppID. Crusader Kings III is 1158310.
+        type: string
+        default: "1158310"
+    secrets:
+      STEAM_USERNAME:
+        required: false
+      STEAM_CONFIG_VDF:
+        required: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check the shipping tree
+        run: |
+          set -uo pipefail
+          fail=0
+          block() { echo "::error::$1"; fail=1; }
+
+          [ -d mod ] || block "no mod/ directory"
+          [ -f mod/descriptor.mod ] || block "mod/descriptor.mod is missing"
+          [ -f mod/thumbnail.png ] || block "mod/thumbnail.png is missing"
+
+          # Steam rejects preview images over 1 MB.
+          if [ -f mod/thumbnail.png ]; then
+            size=$(stat -c%s mod/thumbnail.png)
+            [ "$size" -le 1048576 ] || block "thumbnail.png is $size bytes, Steam's limit is 1048576"
+          fi
+
+          # The Workshop ships mod/ verbatim, so nothing extra may live in it.
+          find mod -name '__pycache__' -o -name '*.pyc' | grep -q . && block "python bytecode inside mod/"
+          [ -e mod/.claude ] && block "mod/.claude would ship"
+          [ -d mod/.git ] && block "mod/.git is a real directory, its whole history would ship"
+
+          for key in version name supported_version remote_file_id; do
+            grep -qE "^$key=" mod/descriptor.mod || block "descriptor.mod has no $key="
+          done
+
+          [ -f workshop/item.json ] || block "workshop/item.json is missing"
+          [ -f workshop/description.bbcode ] || block "workshop/description.bbcode is missing"
+
+          exit $fail
+
+      - name: Check the Workshop metadata
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
+          const desc = fs.readFileSync("workshop/description.bbcode", "utf8");
+          const descriptor = fs.readFileSync("mod/descriptor.mod", "utf8");
+          const errors = [];
+
+          if (!item.title) errors.push("workshop/item.json has no title");
+          else if (item.title.length > 128) errors.push(`title is ${item.title.length} chars, Steam allows 128`);
+          if (desc.length > 8000) errors.push(`description is ${desc.length} chars, Steam allows 8000`);
+
+          const id = (descriptor.match(/^remote_file_id="([0-9]+)"/m) || [])[1];
+          if (!id) errors.push("descriptor.mod has no usable remote_file_id");
+          if (item.publishedfileid && item.publishedfileid !== id) {
+            errors.push(`item.json publishedfileid ${item.publishedfileid} disagrees with descriptor.mod ${id}`);
+          }
+
+          for (const e of errors) console.log("::error::" + e);
+          if (errors.length) process.exit(1);
+          console.log(`ok: "${item.title}", item ${id}, ${desc.length} chars of description`);
+          NODE
+
+      - name: Decide whether this is a release
+        id: decide
+        run: |
+          set -uo pipefail
+          ver() { sed -n 's/^version="\(.*\)"$/\1/p' | head -1; }
+          new=$(ver < mod/descriptor.mod)
+          old=$(git show HEAD^:mod/descriptor.mod 2>/dev/null | ver)
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Pull request: validation only."
+          elif [ "$new" = "$old" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Version is still $new, so nothing is published."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Version went ${old:-none} -> $new, publishing."
+          fi
+
+  publish:
+    needs: validate
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the Steam credentials exist
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+          STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+        run: |
+          if [ -z "$STEAM_USERNAME" ] || [ -z "$STEAM_CONFIG_VDF" ]; then
+            echo "::error::STEAM_USERNAME and STEAM_CONFIG_VDF are not set on this repository. See the ck3-mod-ci README."
+            exit 1
+          fi
+
+      - name: Install SteamCMD
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lib32gcc-s1 >/dev/null
+          mkdir -p ~/steamcmd
+          curl -sqL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar zxf - -C ~/steamcmd
+
+      - name: Restore the Steam session
+        env:
+          STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/Steam/config
+          printf '%s' "$STEAM_CONFIG_VDF" | base64 -d > ~/Steam/config/config.vdf
+          test -s ~/Steam/config/config.vdf
+
+      - name: Build the Workshop manifest
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          SUBJECT=$(git log -1 --pretty=%s)
+          export SUBJECT
+          node <<'NODE'
+          const fs = require("fs");
+          const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
+          const description = fs.readFileSync("workshop/description.bbcode", "utf8").replace(/\r\n/g, "\n").trimEnd();
+          const id = fs.readFileSync("mod/descriptor.mod", "utf8").match(/^remote_file_id="([0-9]+)"/m)[1];
+
+          // Valve KeyValues quoted strings: backslash and quote are escaped,
+          // newlines are encoded rather than embedded raw.
+          const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+
+          const fields = {
+            appid: process.env.APP_ID,
+            publishedfileid: id,
+            contentfolder: `${process.cwd()}/mod`,
+            previewfile: `${process.cwd()}/mod/thumbnail.png`,
+            title: item.title,
+            description: description,
+            changenote: `v${process.env.VERSION} - ${process.env.SUBJECT}`,
+          };
+
+          const body = Object.entries(fields).map(([k, v]) => `\t"${k}"\t"${esc(v)}"`).join("\n");
+          fs.writeFileSync("item.vdf", `"workshopitem"\n{\n${body}\n}\n`);
+          fs.writeFileSync("expected-description.txt", description);
+          console.log(`item ${id}, "${item.title}", ${description.length} chars of description`);
+          NODE
+
+      - name: Upload to the Steam Workshop
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+        run: |
+          set -uo pipefail
+          ~/steamcmd/steamcmd.sh +login "$STEAM_USERNAME" +workshop_build_item "$PWD/item.vdf" +quit | tee steamcmd.log
+          if ! grep -q "Success" steamcmd.log; then
+            echo "::error::SteamCMD did not report success. If it asked for a Steam Guard code, the STEAM_CONFIG_VDF session has expired and needs re-priming."
+            exit 1
+          fi
+
+      # Best effort. Steam only serves details for publicly readable items, so a
+      # hidden or unlisted mod simply skips the comparison.
+      - name: Verify the published listing
+        continue-on-error: true
+        run: |
+          sleep 15
+          node <<'NODE'
+          const fs = require("fs");
+          const id = fs.readFileSync("mod/descriptor.mod", "utf8").match(/^remote_file_id="([0-9]+)"/m)[1];
+          (async () => {
+            const body = new URLSearchParams({ itemcount: "1", "publishedfileids[0]": id });
+            const res = await fetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", { method: "POST", body });
+            const detail = (await res.json()).response.publishedfiledetails[0];
+            if (detail.result !== 1) {
+              console.log(`::notice::item ${id} is not publicly readable (result ${detail.result}), so the description was not verified`);
+              return;
+            }
+            const want = fs.readFileSync("expected-description.txt", "utf8");
+            const got = (detail.description || "").replace(/\r\n/g, "\n").trimEnd();
+            if (got === want) console.log("The published description matches workshop/description.bbcode.");
+            else console.log("::warning::The published description does not match workshop/description.bbcode. Check how newlines survived the upload.");
+          })();
+          NODE
