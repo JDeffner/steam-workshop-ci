@@ -19,6 +19,8 @@ mod/descriptor.mod          version=, name=, supported_version=, remote_file_id=
 mod/thumbnail.png           the Workshop preview, 1 MB maximum
 workshop/item.json          {"title": "...", "publishedfileid": "..."}
 workshop/description.bbcode the Steam listing body, Steam BBCode, 8000 chars max
+workshop/<lang>/title.txt   optional, one localized listing per folder (see below)
+workshop/<lang>/description.bbcode
 .github/workflows/ci.yml    the caller below
 ```
 
@@ -40,6 +42,25 @@ anything sitting in that folder ships. The validation step blocks the known
 offenders (`__pycache__`, `.pyc`, `.claude`, a real `.git` directory) but it is
 not a substitute for looking.
 
+## Localized listings
+
+Steam shows a Workshop title and description per language. Put each one in
+`workshop/<lang>/` with `title.txt` (one line, 128 chars max) and
+`description.bbcode` (8000 chars max). `<lang>` is Steam's API language code:
+`french`, `german`, `spanish`, `russian`, `polish`, `schinese`, `japanese`,
+`koreana`. English stays in `workshop/item.json` and
+`workshop/description.bbcode`. Validation rejects any other folder name.
+
+Steam documents no way to set these without a running Steam client: the VDF
+manifest knows `title` and `description` only, and the Web API has no language
+field at all. So the publish job tries the undocumented `language` VDF key,
+which the documentation says maps onto `ISteamUGC::SetItemUpdateLanguage`. The
+localized passes run before the English upload, so if Steam ignores the key the
+English pass restores the English listing. The last step reads each language's
+public page back and warns when the variant did not land. On a warning, paste
+the text from `workshop/<lang>/` into the Workshop UI by hand; the files remain
+the source of truth either way.
+
 ## Steam credentials
 
 Each mod repo needs two secrets. SteamCMD cannot answer a Steam Guard prompt, so
@@ -59,12 +80,18 @@ it reuses a session you create once on your own machine.
    ```
 
 3. Base64-encode the resulting `config/config.vdf` (next to the SteamCMD
-   install, or `~/Steam/config/config.vdf`) and store it as the repository
-   secret `STEAM_CONFIG_VDF`. Store the account name as `STEAM_USERNAME`.
+   install on Windows, `~/Steam/config/config.vdf` on Linux) and store it as
+   the repository secret `STEAM_CONFIG_VDF`. Store the account name as
+   `STEAM_USERNAME`. With the GitHub CLI, from Git Bash:
 
    ```
-   base64 -w0 config/config.vdf
+   base64 -w0 /f/Programms/steamcmd/config/config.vdf | gh secret set STEAM_CONFIG_VDF -R JDeffner/<repo>
+   gh secret set STEAM_USERNAME -R JDeffner/<repo> --body "<username>"
    ```
+
+   PowerShell has no `base64`; use
+   `[Convert]::ToBase64String([IO.File]::ReadAllBytes("F:\Programms\steamcmd\config\config.vdf"))`
+   instead.
 
 These sessions expire. When a publish fails with a Steam Guard message, repeat
 the steps and replace `STEAM_CONFIG_VDF`.
