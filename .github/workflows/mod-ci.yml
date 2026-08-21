@@ -1,35 +1,54 @@
-# Shared CI for the CK3 mod repos.
+# Reusable CI for a Steam Workshop item kept in a git repository.
 #
 # Every pull request validates the shipping tree and the Workshop metadata.
-# A push to main publishes to the Steam Workshop, but only when the `version=`
-# line in mod/descriptor.mod differs from the previous commit. Bumping the
-# version is therefore the release action; everything else merges freely.
+# A push to the default branch publishes to the Steam Workshop, but only when
+# the version line in the version file differs from the previous commit.
+# Bumping the version is therefore the release action; everything else merges
+# freely.
 #
-# Localized listings live in workshop/<steam-language>/ (title.txt and
-# description.bbcode). Steam documents no way to set them without a running
-# Steam client, so the publish job tries the undocumented `language` VDF key,
-# runs those passes before the English one (if Steam ignores the key, the
-# English pass restores the English listing), and then reads each language's
-# public page back to report whether the variant landed.
+# Two manifest fields are deliberately never written:
 #
-# `visibility` is deliberately never written to the manifest. Steam's manifest
-# only understands public/friends/private, and it has no value for "unlisted",
-# so writing it at all risks flipping an unlisted item public. Visibility stays
-# a manual switch in the Workshop UI.
-name: CK3 mod CI
+#   `tags`       Steam's build manifest has no field for them, so existing
+#                Workshop tags survive an update untouched.
+#   `visibility` The manifest only understands public/friends/private and has
+#                no value for "unlisted", so writing it could flip an unlisted
+#                item public.
+#
+# Localized listings in workshop/<language>/ are validated but never uploaded.
+# Steam offers no headless way to set them (see the README).
+name: Steam Workshop CI
 
 on:
   workflow_call:
     inputs:
       app_id:
-        description: Steam AppID. Crusader Kings III is 1158310.
+        description: Steam AppID that owns the Workshop item. Crusader Kings III is 1158310.
         type: string
         default: "1158310"
+      content_dir:
+        description: Folder uploaded to the Workshop, verbatim.
+        type: string
+        default: mod
+      preview_file:
+        description: Preview image, 1 MB maximum.
+        type: string
+        default: mod/thumbnail.png
+      version_file:
+        description: File carrying the version line that decides a release.
+        type: string
+        default: mod/descriptor.mod
+      version_pattern:
+        description: Regex whose first group is the version, matched multiline against version_file.
+        type: string
+        default: '^version="(.*)"'
     secrets:
       STEAM_USERNAME:
         required: false
       STEAM_CONFIG_VDF:
         required: false
+
+permissions:
+  contents: read
 
 jobs:
   validate:
@@ -38,34 +57,36 @@ jobs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 2
 
       - name: Check the shipping tree
+        env:
+          CONTENT_DIR: ${{ inputs.content_dir }}
+          PREVIEW_FILE: ${{ inputs.preview_file }}
+          VERSION_FILE: ${{ inputs.version_file }}
         run: |
           set -uo pipefail
           fail=0
           block() { echo "::error::$1"; fail=1; }
 
-          [ -d mod ] || block "no mod/ directory"
-          [ -f mod/descriptor.mod ] || block "mod/descriptor.mod is missing"
-          [ -f mod/thumbnail.png ] || block "mod/thumbnail.png is missing"
+          [ -d "$CONTENT_DIR" ] || block "no $CONTENT_DIR/ directory"
+          [ -f "$VERSION_FILE" ] || block "$VERSION_FILE is missing"
+          [ -f "$PREVIEW_FILE" ] || block "$PREVIEW_FILE is missing"
 
           # Steam rejects preview images over 1 MB.
-          if [ -f mod/thumbnail.png ]; then
-            size=$(stat -c%s mod/thumbnail.png)
-            [ "$size" -le 1048576 ] || block "thumbnail.png is $size bytes, Steam's limit is 1048576"
+          if [ -f "$PREVIEW_FILE" ]; then
+            size=$(stat -c%s "$PREVIEW_FILE")
+            [ "$size" -le 1048576 ] || block "$PREVIEW_FILE is $size bytes, Steam's limit is 1048576"
           fi
 
-          # The Workshop ships mod/ verbatim, so nothing extra may live in it.
-          find mod -name '__pycache__' -o -name '*.pyc' | grep -q . && block "python bytecode inside mod/"
-          [ -e mod/.claude ] && block "mod/.claude would ship"
-          [ -d mod/.git ] && block "mod/.git is a real directory, its whole history would ship"
-
-          for key in version name supported_version remote_file_id; do
-            grep -qE "^$key=" mod/descriptor.mod || block "descriptor.mod has no $key="
-          done
+          # The Workshop ships the content folder verbatim, so nothing extra may live in it.
+          if [ -d "$CONTENT_DIR" ]; then
+            find "$CONTENT_DIR" -name '__pycache__' -o -name '*.pyc' | grep -q . && block "python bytecode inside $CONTENT_DIR/"
+            [ -e "$CONTENT_DIR/.claude" ] && block "$CONTENT_DIR/.claude would ship"
+            [ -d "$CONTENT_DIR/.git" ] && block "$CONTENT_DIR/.git is a real directory, its whole history would ship"
+          fi
 
           [ -f workshop/item.json ] || block "workshop/item.json is missing"
           [ -f workshop/description.bbcode ] || block "workshop/description.bbcode is missing"
@@ -73,25 +94,33 @@ jobs:
           exit $fail
 
       - name: Check the Workshop metadata
+        env:
+          VERSION_FILE: ${{ inputs.version_file }}
         run: |
           node <<'NODE'
           const fs = require("fs");
           const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
           const desc = fs.readFileSync("workshop/description.bbcode", "utf8");
-          const descriptor = fs.readFileSync("mod/descriptor.mod", "utf8");
           const errors = [];
 
           if (!item.title) errors.push("workshop/item.json has no title");
           else if (item.title.length > 128) errors.push(`title is ${item.title.length} chars, Steam allows 128`);
           if (desc.length > 8000) errors.push(`description is ${desc.length} chars, Steam allows 8000`);
 
-          // Steam API language codes for the languages Paradox ships CK3 in.
-          const languages = ["french", "german", "spanish", "russian", "polish", "schinese", "japanese", "koreana"];
+          // Steam API language codes. The folders are never uploaded, they are
+          // the source you paste into the Workshop UI, but a typo in the code
+          // would make that pairing wrong, so the set is still checked.
+          const languages = [
+            "arabic", "bulgarian", "schinese", "tchinese", "czech", "danish", "dutch", "english",
+            "finnish", "french", "german", "greek", "hungarian", "indonesian", "italian", "japanese",
+            "koreana", "norwegian", "polish", "portuguese", "brazilian", "romanian", "russian",
+            "spanish", "latam", "swedish", "thai", "turkish", "ukrainian", "vietnamese",
+          ];
           const found = [];
           for (const entry of fs.readdirSync("workshop", { withFileTypes: true })) {
             if (!entry.isDirectory()) continue;
             const lang = entry.name, dir = `workshop/${lang}`;
-            if (!languages.includes(lang)) { errors.push(`${dir}/ is not a Steam language code (${languages.join(", ")})`); continue; }
+            if (!languages.includes(lang)) { errors.push(`${dir}/ is not a Steam language code`); continue; }
             if (!fs.existsSync(`${dir}/title.txt`)) errors.push(`${dir}/title.txt is missing`);
             else if (fs.readFileSync(`${dir}/title.txt`, "utf8").trim().length > 128) errors.push(`${dir}/title.txt is over 128 chars`);
             if (!fs.existsSync(`${dir}/description.bbcode`)) errors.push(`${dir}/description.bbcode is missing`);
@@ -99,10 +128,15 @@ jobs:
             found.push(lang);
           }
 
-          const id = (descriptor.match(/^remote_file_id="([0-9]+)"/m) || [])[1];
-          if (!id) errors.push("descriptor.mod has no usable remote_file_id");
-          if (item.publishedfileid && item.publishedfileid !== id) {
-            errors.push(`item.json publishedfileid ${item.publishedfileid} disagrees with descriptor.mod ${id}`);
+          const id = String(item.publishedfileid || "");
+          if (!/^[0-9]+$/.test(id)) errors.push("workshop/item.json has no numeric publishedfileid");
+
+          // Paradox descriptors carry the same id a second time. Cross-check it
+          // when it is there, and say nothing when it is not.
+          const versionFile = fs.readFileSync(process.env.VERSION_FILE, "utf8");
+          const mirrored = (versionFile.match(/^remote_file_id="([0-9]+)"/m) || [])[1];
+          if (mirrored && mirrored !== id) {
+            errors.push(`item.json publishedfileid ${id} disagrees with ${process.env.VERSION_FILE} ${mirrored}`);
           }
 
           for (const e of errors) console.log("::error::" + e);
@@ -112,30 +146,47 @@ jobs:
 
       - name: Decide whether this is a release
         id: decide
+        env:
+          VERSION_FILE: ${{ inputs.version_file }}
+          VERSION_PATTERN: ${{ inputs.version_pattern }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          set -uo pipefail
-          ver() { sed -n 's/^version="\(.*\)"$/\1/p' | head -1; }
-          new=$(ver < mod/descriptor.mod)
-          old=$(git show HEAD^:mod/descriptor.mod 2>/dev/null | ver)
-          echo "version=$new" >> "$GITHUB_OUTPUT"
+          node <<'NODE'
+          const fs = require("fs");
+          const { execFileSync } = require("child_process");
+          const file = process.env.VERSION_FILE;
+          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+          const value = (text) => (text && (text.match(re) || [])[1]) || "";
 
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Pull request: validation only."
-          elif [ "$new" = "$old" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Version is still $new, so nothing is published."
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Version went ${old:-none} -> $new, publishing."
-          fi
+          const now = value(fs.readFileSync(file, "utf8"));
+          let before = "";
+          try { before = value(execFileSync("git", ["show", `HEAD^:${file}`], { encoding: "utf8" })); } catch {}
+          if (!now) { console.log(`::error::${file} has no line matching ${re}`); process.exit(1); }
+
+          const out = [`version=${now}`];
+          if (process.env.EVENT_NAME !== "push") {
+            out.push("publish=false");
+            console.log("Not a push: validation only.");
+          } else if (now === before) {
+            out.push("publish=false");
+            console.log(`Version is still ${now}, so nothing is published.`);
+          } else {
+            out.push("publish=true");
+            console.log(`Version went ${before || "none"} -> ${now}, publishing.`);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join("\n") + "\n");
+          NODE
 
   publish:
     needs: validate
     if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Full history: the change notes are built from every commit since the
+      # previous version bump.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
 
       - name: Check the Steam credentials exist
         env:
@@ -168,64 +219,77 @@ jobs:
       - name: Build the Workshop manifest
         env:
           APP_ID: ${{ inputs.app_id }}
+          CONTENT_DIR: ${{ inputs.content_dir }}
+          PREVIEW_FILE: ${{ inputs.preview_file }}
+          VERSION_FILE: ${{ inputs.version_file }}
+          VERSION_PATTERN: ${{ inputs.version_pattern }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
-          SUBJECT=$(git log -1 --pretty=%s)
-          export SUBJECT
           node <<'NODE'
           const fs = require("fs");
-          const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
-          const description = fs.readFileSync("workshop/description.bbcode", "utf8").replace(/\r\n/g, "\n").trimEnd();
-          const id = fs.readFileSync("mod/descriptor.mod", "utf8").match(/^remote_file_id="([0-9]+)"/m)[1];
+          const path = require("path");
+          const { execFileSync } = require("child_process");
 
-          // Valve KeyValues quoted strings: backslash and quote are escaped,
-          // newlines are encoded rather than embedded raw.
-          const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+          const version = process.env.VERSION;
+          const versionFile = process.env.VERSION_FILE;
+          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+
+          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8" }); } catch { return null; } };
+          const versionAt = (rev) => { const t = git(["show", `${rev}:${versionFile}`]); return (t && (t.match(re) || [])[1]) || ""; };
+
+          // The release notes cover every commit since the previous version
+          // bump: walk the history of the version file backwards, past the
+          // commits that already carry this version, to the commit that
+          // introduced the one before it.
+          const touched = (git(["log", "--format=%H", "HEAD", "--", versionFile]) || "").trim().split("\n").filter(Boolean);
+          let previous = null;
+          for (const commit of touched) {
+            if (versionAt(commit) === version) continue;
+            if (versionAt(commit) !== versionAt(`${commit}^`)) { previous = commit; break; }
+          }
+          const range = previous ? [`${previous}..HEAD`] : ["-1"];
+          const subjects = (git(["log", "--no-merges", "--format=%s", ...range]) || "")
+            .split("\n").map((s) => s.trim()).filter(Boolean);
+
+          let changenote = `v${version}`;
+          const items = [];
+          let budget = 8000 - changenote.length - "\n[list]\n[/list]".length;
+          for (const subject of subjects) {
+            const line = `[*]${subject}\n`;
+            if (line.length > budget) break;
+            items.push(line);
+            budget -= line.length;
+          }
+          if (items.length) changenote += `\n[list]\n${items.join("")}[/list]`;
+
+          // SteamCMD does NOT process escape sequences in workshop_build_item:
+          // a `\n` written into the manifest reaches the Workshop as those two
+          // characters. So newlines go in raw and backslashes stay as they are.
+          // A double quote would end the value and cannot be escaped either,
+          // so quotes become typographic ones, opening and closing by turns.
+          const quotes = (s) => { let n = 0; return String(s).replace(/"/g, () => (n++ % 2 ? "”" : "“")); };
+
+          const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
+          const description = quotes(fs.readFileSync("workshop/description.bbcode", "utf8").replace(/\r\n/g, "\n").trimEnd());
+          const title = quotes(item.title);
+          const id = String(item.publishedfileid);
 
           const fields = {
             appid: process.env.APP_ID,
             publishedfileid: id,
-            contentfolder: `${process.cwd()}/mod`,
-            previewfile: `${process.cwd()}/mod/thumbnail.png`,
-            title: item.title,
+            contentfolder: path.resolve(process.env.CONTENT_DIR),
+            previewfile: path.resolve(process.env.PREVIEW_FILE),
+            title: title,
             description: description,
-            changenote: `v${process.env.VERSION} - ${process.env.SUBJECT}`,
+            changenote: quotes(changenote).slice(0, 8000),
           };
 
-          const vdf = (f) => `"workshopitem"\n{\n${Object.entries(f).map(([k, v]) => `\t"${k}"\t"${esc(v)}"`).join("\n")}\n}\n`;
-          fs.writeFileSync("item.vdf", vdf(fields));
+          const body = Object.entries(fields).map(([k, v]) => `\t"${k}"\t"${v}"`).join("\n");
+          fs.writeFileSync("item.vdf", `"workshopitem"\n{\n${body}\n}\n`);
           fs.writeFileSync("expected-description.txt", description);
-          console.log(`item ${id}, "${item.title}", ${description.length} chars of description`);
-
-          // One manifest per localized listing: same content, no changenote,
-          // plus the undocumented `language` key (see the header comment).
-          fs.mkdirSync("localized", { recursive: true });
-          const langs = fs.readdirSync("workshop", { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-          for (const lang of langs) {
-            const title = fs.readFileSync(`workshop/${lang}/title.txt`, "utf8").trim();
-            const text = fs.readFileSync(`workshop/${lang}/description.bbcode`, "utf8").replace(/\r\n/g, "\n").trimEnd();
-            const { changenote, ...base } = fields;
-            fs.writeFileSync(`localized/${lang}.vdf`, vdf({ ...base, language: lang, title, description: text }));
-            fs.writeFileSync(`localized/${lang}.txt`, text);
-            console.log(`  ${lang}: "${title}", ${text.length} chars`);
-          }
+          console.log(`item ${id}, "${title}", ${description.length} chars of description, ${items.length} change note entries`);
           NODE
-
-      # Experimental, so a failure here is a warning. Runs before the English
-      # upload so that, if Steam ignores `language`, the English pass wins.
-      - name: Upload the localized listings
-        env:
-          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
-        run: |
-          set -uo pipefail
-          for vdf in localized/*.vdf; do
-            [ -e "$vdf" ] || { echo "No localized listings."; break; }
-            lang=$(basename "$vdf" .vdf)
-            ~/steamcmd/steamcmd.sh +login "$STEAM_USERNAME" +workshop_build_item "$PWD/$vdf" +quit > "localized/$lang.log"
-            if grep -q "Success" "localized/$lang.log"; then echo "$lang: accepted"
-            else echo "::warning::$lang: SteamCMD did not report success"; tail -5 "localized/$lang.log"; fi
-          done
 
       - name: Upload to the Steam Workshop
         env:
@@ -239,14 +303,14 @@ jobs:
           fi
 
       # Best effort. Steam only serves details for publicly readable items, so a
-      # hidden or unlisted mod simply skips the comparison.
+      # hidden or unlisted item simply skips the comparison.
       - name: Verify the published listing
         continue-on-error: true
         run: |
           sleep 15
           node <<'NODE'
           const fs = require("fs");
-          const id = fs.readFileSync("mod/descriptor.mod", "utf8").match(/^remote_file_id="([0-9]+)"/m)[1];
+          const id = String(JSON.parse(fs.readFileSync("workshop/item.json", "utf8")).publishedfileid);
           (async () => {
             const body = new URLSearchParams({ itemcount: "1", "publishedfileids[0]": id });
             const res = await fetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", { method: "POST", body });
@@ -258,31 +322,6 @@ jobs:
             const want = fs.readFileSync("expected-description.txt", "utf8");
             const got = (detail.description || "").replace(/\r\n/g, "\n").trimEnd();
             if (got === want) console.log("The published description matches workshop/description.bbcode.");
-            else console.log("::warning::The published description does not match workshop/description.bbcode. Check how newlines survived the upload.");
-          })();
-          NODE
-
-      # Best effort, public items only. Reads each language's community page
-      # and looks for the start of that language's description in it. A miss
-      # means Steam ignored the `language` key and the text must be pasted by
-      # hand in the Workshop UI.
-      - name: Verify the localized listings
-        continue-on-error: true
-        run: |
-          node <<'NODE'
-          const fs = require("fs");
-          const id = fs.readFileSync("mod/descriptor.mod", "utf8").match(/^remote_file_id="([0-9]+)"/m)[1];
-          const langs = fs.existsSync("localized") ? fs.readdirSync("localized").filter((f) => f.endsWith(".txt")).map((f) => f.slice(0, -4)) : [];
-          const plain = (s) => s.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim();
-          const strip = (h) => h.replace(/<[^>]+>/g, " ").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ");
-          (async () => {
-            for (const lang of langs) {
-              const want = plain(fs.readFileSync(`localized/${lang}.txt`, "utf8")).slice(0, 60);
-              const res = await fetch(`https://steamcommunity.com/sharedfiles/filedetails/?id=${id}&l=${lang}`);
-              const html = await res.text();
-              if (!html.includes("workshopItemDescription")) { console.log(`::notice::${lang}: item ${id} is not publicly readable, not verified`); continue; }
-              if (strip(html).includes(want)) console.log(`${lang}: the published listing shows the ${lang} text.`);
-              else console.log(`::warning::${lang}: the published page does not show the ${lang} description. Steam probably ignored the language key; paste workshop/${lang}/ into the Workshop UI by hand.`);
-            }
+            else console.log("::warning::The published description does not match workshop/description.bbcode. Check how newlines and quotes survived the upload.");
           })();
           NODE
