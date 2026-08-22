@@ -15,6 +15,10 @@ behaviour, since callers reference it by path.
   (`workflow_dispatch`) forces the same listing update.
 - Everything else merges without touching the Workshop.
 
+Only the repository's default branch publishes. The workflow checks that
+itself, so a push to any other branch validates and stops even when the
+caller's `on:` block carries no branch filter.
+
 ## What a repo needs
 
 ```
