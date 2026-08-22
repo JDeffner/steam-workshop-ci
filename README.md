@@ -166,3 +166,6 @@ raw, leaves backslashes alone, and rewrites double quotes in the title and the
 description as typographic quotes (opening and closing by turns) before
 uploading. Write `"` in your BBCode if you like; the listing will show `“` and
 `”`.
+
+Text inside square brackets is left alone, so a tag such as
+`[url="https://example.com"]` keeps its straight quotes and still works.

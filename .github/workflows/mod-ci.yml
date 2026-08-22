@@ -305,7 +305,15 @@ jobs:
           // characters. So newlines go in raw and backslashes stay as they are.
           // A double quote would end the value and cannot be escaped either,
           // so quotes become typographic ones, opening and closing by turns.
-          const quotes = (s) => { let n = 0; return String(s).replace(/"/g, () => (n++ % 2 ? "”" : "“")); };
+          // BBCode tags are left alone: `[url="..."]` needs its straight
+          // quotes or Steam renders the tag literally. Splitting on a
+          // capturing group puts the tags on the odd indices.
+          const quotes = (s) => {
+            let n = 0;
+            return String(s).split(/(\[[^\]]*\])/).map((part, i) =>
+              i % 2 ? part : part.replace(/"/g, () => (n++ % 2 ? "”" : "“"))
+            ).join("");
+          };
 
           const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
           const description = quotes(fs.readFileSync("workshop/description.bbcode", "utf8").replace(/\r\n/g, "\n").trimEnd());
