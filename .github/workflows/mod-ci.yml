@@ -337,6 +337,10 @@ jobs:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
         run: |
           set -uo pipefail
+          # GitHub already runs this step with `bash -e`, and SteamCMD exits
+          # non-zero on an expired session. Turn errexit off so the hint below
+          # is reachable, and let the grep be the only failure path.
+          set +e
           ~/steamcmd/steamcmd.sh +login "$STEAM_USERNAME" +workshop_build_item "$PWD/item.vdf" +quit | tee steamcmd.log
           if ! grep -q "Success" steamcmd.log; then
             echo "::error::SteamCMD did not report success. If it asked for a Steam Guard code, the STEAM_CONFIG_VDF session has expired and needs re-priming."
