@@ -169,3 +169,13 @@ uploading. Write `"` in your BBCode if you like; the listing will show `“` and
 
 Text inside square brackets is left alone, so a tag such as
 `[url="https://example.com"]` keeps its straight quotes and still works.
+
+## Self-test
+
+This repository is other repositories' quality gate, so it has one of its
+own in `.github/workflows/ci.yml`. It runs `actionlint` (with `shellcheck`,
+which reads the `run:` bodies) on every change, and on a pull request it calls
+`mod-ci.yml` against the fixture in `mod/` and `workshop/`. That fixture is
+why a workflow repository carries a mod tree: it is a self test, not a mod,
+and it is never uploaded. The self-test job stays off pushes, because a
+fixture version bump would send the publish job at Steam.
