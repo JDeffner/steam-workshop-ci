@@ -2,7 +2,7 @@
 #
 # Every pull request validates the shipping tree and the Workshop metadata.
 # A push to the default branch publishes to the Steam Workshop, but only when
-# the version line in the version file differs from the previous commit.
+# the version line in the version file differs from the state before the push.
 # Bumping the version is therefore the release action; everything else merges
 # freely. A push that leaves the version alone but touches workshop/ sends a
 # listing update instead: title and description only, no content, no change
@@ -59,9 +59,11 @@ jobs:
       mode: ${{ steps.decide.outputs.mode }}
       version: ${{ steps.decide.outputs.version }}
     steps:
+      # Full history: the version comparison uses the base of the whole push,
+      # which can be older than HEAD^.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Check the shipping tree
         env:
@@ -152,19 +154,32 @@ jobs:
           VERSION_FILE: ${{ inputs.version_file }}
           VERSION_PATTERN: ${{ inputs.version_pattern }}
           EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           node <<'NODE'
           const fs = require("fs");
           const { execFileSync } = require("child_process");
           const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8" }); } catch { return ""; } };
+          const commitExists = (rev) => {
+            try { execFileSync("git", ["cat-file", "-e", `${rev}^{commit}`], { stdio: "ignore" }); return true; }
+            catch { return false; }
+          };
           const file = process.env.VERSION_FILE;
           const re = new RegExp(process.env.VERSION_PATTERN, "m");
           const value = (text) => (text && (text.match(re) || [])[1]) || "";
 
+          // Compare against the base of the whole push, not HEAD^: a push of
+          // several commits can carry the version bump in the first one. The
+          // sha is all zeroes for a new branch and can be gone after a force
+          // push, so HEAD^ stays the fallback.
+          const beforeSha = process.env.BEFORE_SHA || "";
+          const usable = /^[0-9a-f]{40}$/.test(beforeSha) && !/^0+$/.test(beforeSha) && commitExists(beforeSha);
+          const base = usable ? beforeSha : "HEAD^";
+
           const now = value(fs.readFileSync(file, "utf8"));
-          const before = value(git(["show", `HEAD^:${file}`]));
+          const before = value(git(["show", `${base}:${file}`]));
           if (!now) { console.log(`::error::${file} has no line matching ${re}`); process.exit(1); }
-          const listingTouched = git(["diff", "--name-only", "HEAD^", "HEAD", "--", "workshop"]).trim() !== "";
+          const listingTouched = git(["diff", "--name-only", base, "HEAD", "--", "workshop"]).trim() !== "";
 
           let mode = "none";
           if (process.env.EVENT_NAME === "workflow_dispatch") {
