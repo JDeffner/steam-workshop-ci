@@ -209,6 +209,13 @@ jobs:
     needs: validate
     if: needs.validate.outputs.mode != 'none'
     runs-on: ubuntu-latest
+    # Two merges minutes apart would otherwise run two SteamCMD uploads
+    # against the same item at once. Queue them instead, and never cancel one:
+    # a half-finished upload is worse than a slow one. The group sits on the
+    # job, not the workflow, so pull request validation still runs in parallel.
+    concurrency:
+      group: workshop-${{ inputs.app_id }}-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       # Full history: the change notes are built from every commit since the
       # previous version bump.
