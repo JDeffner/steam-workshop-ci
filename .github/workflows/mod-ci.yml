@@ -167,7 +167,11 @@ jobs:
             catch { return false; }
           };
           const file = process.env.VERSION_FILE;
-          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+          // A caller can pass anything here, so say what is wrong instead of
+          // throwing a stack trace at them.
+          let re;
+          try { re = new RegExp(process.env.VERSION_PATTERN, "m"); }
+          catch (e) { console.log(`::error::version_pattern is not a valid regex: ${e.message}`); process.exit(1); }
           const value = (text) => (text && (text.match(re) || [])[1]) || "";
 
           // Compare against the base of the whole push, not HEAD^: a push of
@@ -270,7 +274,9 @@ jobs:
           const version = process.env.VERSION;
           const release = process.env.MODE === "release";
           const versionFile = process.env.VERSION_FILE;
-          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+          let re;
+          try { re = new RegExp(process.env.VERSION_PATTERN, "m"); }
+          catch (e) { console.log(`::error::version_pattern is not a valid regex: ${e.message}`); process.exit(1); }
 
           const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8" }); } catch { return null; } };
           const versionAt = (rev) => { const t = git(["show", `${rev}:${versionFile}`]); return (t && (t.match(re) || [])[1]) || ""; };
