@@ -179,3 +179,8 @@ which reads the `run:` bodies) on every change, and on a pull request it calls
 why a workflow repository carries a mod tree: it is a self test, not a mod,
 and it is never uploaded. The self-test job stays off pushes, because a
 fixture version bump would send the publish job at Steam.
+
+## License
+
+GNU General Public License v3.0, the same as the sibling repositories. See
+`LICENSE`.
