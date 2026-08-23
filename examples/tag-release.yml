@@ -1,0 +1,32 @@
+# An item whose files carry no version number anywhere: tags decide releases.
+#
+#   git tag v1.4.2 && git push origin v1.4.2   ->  publishes as 1.4.2
+#   an ordinary push touching workshop/        ->  updates the listing text
+#
+# The manual run offers the three modes, so a release can also be forced by
+# hand from the Actions tab.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What to publish
+        type: choice
+        default: listing
+        options: [listing, release, validate]
+
+jobs:
+  ci:
+    uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@main
+    with:
+      app_id: "0000000"
+      content_dir: content
+      preview_file: workshop/preview.png
+      release_on: tag
+      mode: ${{ inputs.mode || 'auto' }}
+    secrets: inherit

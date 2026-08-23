@@ -1,12 +1,15 @@
 # Reusable CI for a Steam Workshop item kept in a git repository.
 #
 # Every pull request validates the shipping tree and the Workshop metadata.
-# A push to the default branch publishes to the Steam Workshop, but only when
-# the version line in the version file differs from the previous commit.
-# Bumping the version is therefore the release action; everything else merges
-# freely. A push that leaves the version alone but touches workshop/ sends a
-# listing update instead: title and description only, no content, no change
-# note. A workflow_dispatch from the caller forces that same listing update.
+# A push to the default branch publishes, but only when the release trigger
+# fires: either the version line in `version_file` changed since the previous
+# push, or a tag was pushed, depending on `release_on`. Everything else merges
+# freely.
+#
+# A push that does not release but touches the metadata folder sends a listing
+# update instead: title and description only, no content, no change note, so
+# Steam records no new update entry. A workflow_dispatch does the same. The
+# caller can override the whole decision with `mode`.
 #
 # Two manifest fields are deliberately never written:
 #
@@ -16,33 +19,49 @@
 #                no value for "unlisted", so writing it could flip an unlisted
 #                item public.
 #
-# Localized listings in workshop/<language>/ are validated but never uploaded.
-# Steam offers no headless way to set them (see the README).
+# Localized listings in <workshop_dir>/<language>/ are validated but never
+# uploaded. Steam offers no headless way to set them (see the README).
 name: Steam Workshop CI
 
 on:
   workflow_call:
     inputs:
       app_id:
-        description: Steam AppID that owns the Workshop item. Crusader Kings III is 1158310.
+        description: Steam AppID that owns the Workshop item. It is the number in the game's store page URL.
         type: string
-        default: "1158310"
+        required: true
       content_dir:
         description: Folder uploaded to the Workshop, verbatim.
         type: string
-        default: mod
+        required: true
+      workshop_dir:
+        description: Folder holding item.json, description.bbcode and the localized listings.
+        type: string
+        default: workshop
       preview_file:
-        description: Preview image, 1 MB maximum.
+        description: Preview image, 1 MB maximum. Leave empty to keep whatever preview the item already has.
         type: string
-        default: mod/thumbnail.png
+        default: ""
       version_file:
-        description: File carrying the version line that decides a release.
+        description: File carrying the version line. Required when release_on is "version".
         type: string
-        default: mod/descriptor.mod
+        default: ""
       version_pattern:
-        description: Regex whose first group is the version, matched multiline against version_file.
+        description: Regex whose first group is the version, matched multiline against version_file. The default matches a Paradox descriptor.
         type: string
         default: '^version="(.*)"'
+      id_pattern:
+        description: Regex whose first group is the Workshop item id inside version_file, cross-checked against item.json. Empty disables the check.
+        type: string
+        default: '^remote_file_id="([0-9]+)"'
+      release_on:
+        description: 'What counts as a release: "version" (the version line changed) or "tag" (a tag was pushed).'
+        type: string
+        default: version
+      mode:
+        description: 'Override the decision: auto, release, listing or validate.'
+        type: string
+        default: auto
     secrets:
       STEAM_USERNAME:
         required: false
@@ -59,53 +78,69 @@ jobs:
       mode: ${{ steps.decide.outputs.mode }}
       version: ${{ steps.decide.outputs.version }}
     steps:
+      # Full history: the release decision compares against the commit the push
+      # started from, which is not always HEAD^, and tag releases need tags.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Check the shipping tree
         env:
           CONTENT_DIR: ${{ inputs.content_dir }}
           PREVIEW_FILE: ${{ inputs.preview_file }}
           VERSION_FILE: ${{ inputs.version_file }}
+          WORKSHOP_DIR: ${{ inputs.workshop_dir }}
         run: |
           set -uo pipefail
           fail=0
           block() { echo "::error::$1"; fail=1; }
 
-          [ -d "$CONTENT_DIR" ] || block "no $CONTENT_DIR/ directory"
-          [ -f "$VERSION_FILE" ] || block "$VERSION_FILE is missing"
-          [ -f "$PREVIEW_FILE" ] || block "$PREVIEW_FILE is missing"
-
-          # Steam rejects preview images over 1 MB.
-          if [ -f "$PREVIEW_FILE" ]; then
-            size=$(stat -c%s "$PREVIEW_FILE")
-            [ "$size" -le 1048576 ] || block "$PREVIEW_FILE is $size bytes, Steam's limit is 1048576"
-          fi
-
-          # The Workshop ships the content folder verbatim, so nothing extra may live in it.
-          if [ -d "$CONTENT_DIR" ]; then
+          if [ ! -d "$CONTENT_DIR" ]; then
+            block "no $CONTENT_DIR/ directory"
+          elif [ -z "$(find "$CONTENT_DIR" -type f -print -quit)" ]; then
+            block "$CONTENT_DIR/ holds no files, Steam would publish an empty item"
+          else
+            # The Workshop ships the content folder verbatim, so nothing extra may live in it.
             find "$CONTENT_DIR" -name '__pycache__' -o -name '*.pyc' | grep -q . && block "python bytecode inside $CONTENT_DIR/"
             [ -e "$CONTENT_DIR/.claude" ] && block "$CONTENT_DIR/.claude would ship"
             [ -d "$CONTENT_DIR/.git" ] && block "$CONTENT_DIR/.git is a real directory, its whole history would ship"
           fi
 
-          [ -f workshop/item.json ] || block "workshop/item.json is missing"
-          [ -f workshop/description.bbcode ] || block "workshop/description.bbcode is missing"
+          [ -z "$VERSION_FILE" ] || [ -f "$VERSION_FILE" ] || block "$VERSION_FILE is missing"
+
+          if [ -n "$PREVIEW_FILE" ]; then
+            if [ ! -f "$PREVIEW_FILE" ]; then
+              block "$PREVIEW_FILE is missing"
+            else
+              # Steam rejects preview images over 1 MB.
+              size=$(stat -c%s "$PREVIEW_FILE")
+              [ "$size" -le 1048576 ] || block "$PREVIEW_FILE is $size bytes, Steam's limit is 1048576"
+              case "${PREVIEW_FILE,,}" in
+                *.png|*.jpg|*.jpeg|*.gif) ;;
+                *) echo "::warning::$PREVIEW_FILE is not a png, jpg or gif, which is what Steam shows" ;;
+              esac
+            fi
+          fi
+
+          [ -f "$WORKSHOP_DIR/item.json" ] || block "$WORKSHOP_DIR/item.json is missing"
+          [ -f "$WORKSHOP_DIR/description.bbcode" ] || block "$WORKSHOP_DIR/description.bbcode is missing"
 
           exit $fail
 
       - name: Check the Workshop metadata
         env:
           VERSION_FILE: ${{ inputs.version_file }}
+          WORKSHOP_DIR: ${{ inputs.workshop_dir }}
+          ID_PATTERN: ${{ inputs.id_pattern }}
         run: |
           node <<'NODE'
           const fs = require("fs");
-          const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
-          const desc = fs.readFileSync("workshop/description.bbcode", "utf8");
+          const dir = process.env.WORKSHOP_DIR;
+          const item = JSON.parse(fs.readFileSync(`${dir}/item.json`, "utf8"));
+          const desc = fs.readFileSync(`${dir}/description.bbcode`, "utf8");
           const errors = [];
 
-          if (!item.title) errors.push("workshop/item.json has no title");
+          if (!item.title) errors.push(`${dir}/item.json has no title`);
           else if (item.title.length > 128) errors.push(`title is ${item.title.length} chars, Steam allows 128`);
           if (desc.length > 8000) errors.push(`description is ${desc.length} chars, Steam allows 8000`);
 
@@ -119,26 +154,29 @@ jobs:
             "spanish", "latam", "swedish", "thai", "turkish", "ukrainian", "vietnamese",
           ];
           const found = [];
-          for (const entry of fs.readdirSync("workshop", { withFileTypes: true })) {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             if (!entry.isDirectory()) continue;
-            const lang = entry.name, dir = `workshop/${lang}`;
-            if (!languages.includes(lang)) { errors.push(`${dir}/ is not a Steam language code`); continue; }
-            if (!fs.existsSync(`${dir}/title.txt`)) errors.push(`${dir}/title.txt is missing`);
-            else if (fs.readFileSync(`${dir}/title.txt`, "utf8").trim().length > 128) errors.push(`${dir}/title.txt is over 128 chars`);
-            if (!fs.existsSync(`${dir}/description.bbcode`)) errors.push(`${dir}/description.bbcode is missing`);
-            else if (fs.readFileSync(`${dir}/description.bbcode`, "utf8").length > 8000) errors.push(`${dir}/description.bbcode is over 8000 chars`);
+            const lang = entry.name, sub = `${dir}/${lang}`;
+            if (!languages.includes(lang)) { errors.push(`${sub}/ is not a Steam language code`); continue; }
+            if (!fs.existsSync(`${sub}/title.txt`)) errors.push(`${sub}/title.txt is missing`);
+            else if (fs.readFileSync(`${sub}/title.txt`, "utf8").trim().length > 128) errors.push(`${sub}/title.txt is over 128 chars`);
+            if (!fs.existsSync(`${sub}/description.bbcode`)) errors.push(`${sub}/description.bbcode is missing`);
+            else if (fs.readFileSync(`${sub}/description.bbcode`, "utf8").length > 8000) errors.push(`${sub}/description.bbcode is over 8000 chars`);
             found.push(lang);
           }
 
           const id = String(item.publishedfileid || "");
-          if (!/^[0-9]+$/.test(id)) errors.push("workshop/item.json has no numeric publishedfileid");
+          if (!/^[0-9]+$/.test(id)) errors.push(`${dir}/item.json has no numeric publishedfileid`);
 
-          // Paradox descriptors carry the same id a second time. Cross-check it
-          // when it is there, and say nothing when it is not.
-          const versionFile = fs.readFileSync(process.env.VERSION_FILE, "utf8");
-          const mirrored = (versionFile.match(/^remote_file_id="([0-9]+)"/m) || [])[1];
-          if (mirrored && mirrored !== id) {
-            errors.push(`item.json publishedfileid ${id} disagrees with ${process.env.VERSION_FILE} ${mirrored}`);
+          // Some manifests carry the item id a second time, a Paradox descriptor
+          // among them. Cross-check it when it is there, say nothing when it is not.
+          const versionFile = process.env.VERSION_FILE;
+          const idPattern = process.env.ID_PATTERN;
+          if (versionFile && idPattern && fs.existsSync(versionFile)) {
+            const mirrored = (fs.readFileSync(versionFile, "utf8").match(new RegExp(idPattern, "m")) || [])[1];
+            if (mirrored && mirrored !== id) {
+              errors.push(`item.json publishedfileid ${id} disagrees with ${versionFile} ${mirrored}`);
+            }
           }
 
           for (const e of errors) console.log("::error::" + e);
@@ -151,37 +189,102 @@ jobs:
         env:
           VERSION_FILE: ${{ inputs.version_file }}
           VERSION_PATTERN: ${{ inputs.version_pattern }}
+          WORKSHOP_DIR: ${{ inputs.workshop_dir }}
+          RELEASE_ON: ${{ inputs.release_on }}
+          MODE_INPUT: ${{ inputs.mode }}
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           node <<'NODE'
           const fs = require("fs");
           const { execFileSync } = require("child_process");
-          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8" }); } catch { return ""; } };
-          const file = process.env.VERSION_FILE;
-          const re = new RegExp(process.env.VERSION_PATTERN, "m");
-          const value = (text) => (text && (text.match(re) || [])[1]) || "";
+          // stderr is dropped: reaching past the root commit is an expected miss, not news.
+          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
+          const has = (rev) => git(["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]) !== null;
+          const die = (m) => { console.log("::error::" + m); process.exit(1); };
 
-          const now = value(fs.readFileSync(file, "utf8"));
-          const before = value(git(["show", `HEAD^:${file}`]));
-          if (!now) { console.log(`::error::${file} has no line matching ${re}`); process.exit(1); }
-          const listingTouched = git(["diff", "--name-only", "HEAD^", "HEAD", "--", "workshop"]).trim() !== "";
+          const forced = process.env.MODE_INPUT || "auto";
+          if (!["auto", "release", "listing", "validate"].includes(forced)) die(`mode must be auto, release, listing or validate, not "${forced}"`);
+          const releaseOn = process.env.RELEASE_ON || "version";
+          if (!["version", "tag"].includes(releaseOn)) die(`release_on must be version or tag, not "${releaseOn}"`);
+
+          const event = process.env.EVENT_NAME;
+          const workshopDir = process.env.WORKSHOP_DIR;
+          const versionFile = process.env.VERSION_FILE;
+          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+          const value = (text) => ((text && (text.match(re) || [])[1]) || "").trim();
+
+          if (releaseOn === "version" && !versionFile) {
+            die('release_on is "version" but no version_file was given. Set version_file, or switch release_on to "tag".');
+          }
+
+          // The version string and the release trigger are separate: the file
+          // wins when there is one, whatever fired the run.
+          let version = "";
+          if (versionFile) {
+            version = value(fs.readFileSync(versionFile, "utf8"));
+            if (!version) die(`${versionFile} has no line matching ${re}`);
+          } else if (process.env.REF_TYPE === "tag") {
+            version = process.env.REF_NAME.replace(/^v/, "");
+          } else {
+            version = ((git(["describe", "--tags", "--always"]) || "").trim() || process.env.SHA.slice(0, 7)).replace(/^v/, "");
+          }
+
+          // A push moves the branch from event.before to HEAD, which is not
+          // HEAD^ when the push carried several commits. Tag pushes and force
+          // pushes leave that unusable, so fall back.
+          let before = process.env.BEFORE_SHA || "";
+          if (!before || /^0+$/.test(before) || !has(before)) before = has("HEAD^") ? "HEAD^" : "";
+          const listingTouched = before !== "" && (git(["diff", "--name-only", before, "HEAD", "--", workshopDir]) || "").trim() !== "";
 
           let mode = "none";
-          if (process.env.EVENT_NAME === "workflow_dispatch") {
+          let why = "";
+          if (forced === "validate") {
+            why = "mode is validate, so nothing is published.";
+          } else if (forced !== "auto") {
+            if (event === "pull_request" || event === "pull_request_target") {
+              die(`mode is "${forced}" on a ${event} event. Publishing from a pull request is refused; force a mode from a push or a workflow_dispatch.`);
+            }
+            mode = forced;
+            why = `The caller asked for a ${forced === "release" ? "release" : "listing update"}.`;
+          } else if (event === "workflow_dispatch") {
             mode = "listing";
-            console.log("Manual run: updating the listing only.");
-          } else if (process.env.EVENT_NAME !== "push") {
-            console.log("Not a push: validation only.");
-          } else if (now !== before) {
-            mode = "release";
-            console.log(`Version went ${before || "none"} -> ${now}, publishing.`);
-          } else if (listingTouched) {
-            mode = "listing";
-            console.log(`Version is still ${now} but workshop/ changed: updating the listing only.`);
+            why = "Manual run: updating the listing only.";
+          } else if (event !== "push") {
+            why = `${event} is not a publishing event: validation only.`;
+          } else if (releaseOn === "tag") {
+            if (process.env.REF_TYPE === "tag") {
+              mode = "release";
+              why = `Tag ${process.env.REF_NAME} was pushed, publishing ${version}.`;
+            } else if (listingTouched) {
+              mode = "listing";
+              why = `${workshopDir}/ changed but no tag was pushed: updating the listing only.`;
+            } else {
+              why = "No tag was pushed, so nothing is published.";
+            }
+          } else if (!before) {
+            why = "No earlier commit to compare the version against, so nothing is published.";
           } else {
-            console.log(`Version is still ${now}, so nothing is published.`);
+            const previous = value(git(["show", `${before}:${versionFile}`]));
+            if (version !== previous) {
+              mode = "release";
+              why = `Version went ${previous || "none"} -> ${version}, publishing.`;
+            } else if (listingTouched) {
+              mode = "listing";
+              why = `Version is still ${version} but ${workshopDir}/ changed: updating the listing only.`;
+            } else {
+              why = `Version is still ${version}, so nothing is published.`;
+            }
           }
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${now}\nmode=${mode}\n`);
+
+          console.log(why);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nmode=${mode}\n`);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `**${mode}** — ${why}\n`);
+          }
           NODE
 
   publish:
@@ -190,7 +293,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Full history: the change notes are built from every commit since the
-      # previous version bump.
+      # previous release.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
@@ -201,7 +304,7 @@ jobs:
           STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
         run: |
           if [ -z "$STEAM_USERNAME" ] || [ -z "$STEAM_CONFIG_VDF" ]; then
-            echo "::error::STEAM_USERNAME and STEAM_CONFIG_VDF are not set on this repository. See the ck3-mod-ci README."
+            echo "::error::STEAM_USERNAME and STEAM_CONFIG_VDF are not set on this repository. See the Steam credentials section of the workflow README."
             exit 1
           fi
 
@@ -230,6 +333,10 @@ jobs:
           PREVIEW_FILE: ${{ inputs.preview_file }}
           VERSION_FILE: ${{ inputs.version_file }}
           VERSION_PATTERN: ${{ inputs.version_pattern }}
+          WORKSHOP_DIR: ${{ inputs.workshop_dir }}
+          RELEASE_ON: ${{ inputs.release_on }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
           VERSION: ${{ needs.validate.outputs.version }}
           MODE: ${{ needs.validate.outputs.mode }}
         run: |
@@ -242,22 +349,28 @@ jobs:
           const version = process.env.VERSION;
           const release = process.env.MODE === "release";
           const versionFile = process.env.VERSION_FILE;
+          const workshopDir = process.env.WORKSHOP_DIR;
           const re = new RegExp(process.env.VERSION_PATTERN, "m");
 
-          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8" }); } catch { return null; } };
-          const versionAt = (rev) => { const t = git(["show", `${rev}:${versionFile}`]); return (t && (t.match(re) || [])[1]) || ""; };
+          // stderr is dropped: reaching past the root commit is an expected miss, not news.
+          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
+          const versionAt = (rev) => { const t = git(["show", `${rev}:${versionFile}`]); return ((t && (t.match(re) || [])[1]) || "").trim(); };
 
-          // The release notes cover every commit since the previous version
-          // bump: walk the history of the version file backwards, past the
-          // commits that already carry this version, to the commit that
-          // introduced the one before it.
-          const touched = (git(["log", "--format=%H", "HEAD", "--", versionFile]) || "").trim().split("\n").filter(Boolean);
-          let previous = null;
-          for (const commit of touched) {
-            if (versionAt(commit) === version) continue;
-            if (versionAt(commit) !== versionAt(`${commit}^`)) { previous = commit; break; }
+          // The release notes cover every commit since the previous release.
+          let range = ["-1"];
+          if (process.env.RELEASE_ON === "tag" && process.env.REF_TYPE === "tag") {
+            const previousTag = (git(["describe", "--tags", "--abbrev=0", `${process.env.REF_NAME}^`]) || "").trim();
+            if (previousTag) range = [`${previousTag}..HEAD`];
+          } else if (versionFile) {
+            // Walk the history of the version file backwards, past the commits
+            // that already carry this version, to the commit that introduced
+            // the one before it.
+            const touched = (git(["log", "--format=%H", "HEAD", "--", versionFile]) || "").trim().split("\n").filter(Boolean);
+            for (const commit of touched) {
+              if (versionAt(commit) === version) continue;
+              if (versionAt(commit) !== versionAt(`${commit}^`)) { range = [`${commit}..HEAD`]; break; }
+            }
           }
-          const range = previous ? [`${previous}..HEAD`] : ["-1"];
           const subjects = (git(["log", "--no-merges", "--format=%s", ...range]) || "")
             .split("\n").map((s) => s.trim()).filter(Boolean);
 
@@ -279,20 +392,20 @@ jobs:
           // so quotes become typographic ones, opening and closing by turns.
           const quotes = (s) => { let n = 0; return String(s).replace(/"/g, () => (n++ % 2 ? "”" : "“")); };
 
-          const item = JSON.parse(fs.readFileSync("workshop/item.json", "utf8"));
-          const description = quotes(fs.readFileSync("workshop/description.bbcode", "utf8").replace(/\r\n/g, "\n").trimEnd());
+          const item = JSON.parse(fs.readFileSync(`${workshopDir}/item.json`, "utf8"));
+          const description = quotes(fs.readFileSync(`${workshopDir}/description.bbcode`, "utf8").replace(/\r\n/g, "\n").trimEnd());
           const title = quotes(item.title);
           const id = String(item.publishedfileid);
 
           // A listing update carries no content and no change note, so Steam
           // records no new update entry: only title and description change.
+          // The preview is optional; without one the item keeps the image it has.
+          const preview = process.env.PREVIEW_FILE;
           const fields = {
             appid: process.env.APP_ID,
             publishedfileid: id,
-            ...(release ? {
-              contentfolder: path.resolve(process.env.CONTENT_DIR),
-              previewfile: path.resolve(process.env.PREVIEW_FILE),
-            } : {}),
+            ...(release ? { contentfolder: path.resolve(process.env.CONTENT_DIR) } : {}),
+            ...(release && preview ? { previewfile: path.resolve(preview) } : {}),
             title: title,
             description: description,
             ...(release ? { changenote: quotes(changenote).slice(0, 8000) } : {}),
@@ -319,11 +432,13 @@ jobs:
       # hidden or unlisted item simply skips the comparison.
       - name: Verify the published listing
         continue-on-error: true
+        env:
+          WORKSHOP_DIR: ${{ inputs.workshop_dir }}
         run: |
           sleep 15
           node <<'NODE'
           const fs = require("fs");
-          const id = String(JSON.parse(fs.readFileSync("workshop/item.json", "utf8")).publishedfileid);
+          const id = String(JSON.parse(fs.readFileSync(`${process.env.WORKSHOP_DIR}/item.json`, "utf8")).publishedfileid);
           (async () => {
             const body = new URLSearchParams({ itemcount: "1", "publishedfileids[0]": id });
             const res = await fetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", { method: "POST", body });
@@ -334,7 +449,7 @@ jobs:
             }
             const want = fs.readFileSync("expected-description.txt", "utf8");
             const got = (detail.description || "").replace(/\r\n/g, "\n").trimEnd();
-            if (got === want) console.log("The published description matches workshop/description.bbcode.");
-            else console.log("::warning::The published description does not match workshop/description.bbcode. Check how newlines and quotes survived the upload.");
+            if (got === want) console.log("The published description matches the description in the repository.");
+            else console.log("::warning::The published description does not match the description in the repository. Check how newlines and quotes survived the upload.");
           })();
           NODE
