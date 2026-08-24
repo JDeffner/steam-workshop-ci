@@ -19,6 +19,11 @@
 #                no value for "unlisted", so writing it could flip an unlisted
 #                item public.
 #
+# The change note comes from the changelog: the section whose heading carries
+# the version being released, converted from Markdown to BBCode. A release
+# whose version has no section fails validation. After a successful release the
+# same section is announced on Discord, when DISCORD_WEBHOOK_URL is set.
+#
 # Localized listings in <workshop_dir>/<language>/ are validated but never
 # uploaded. Steam offers no headless way to set them (see the README).
 name: Steam Workshop CI
@@ -54,6 +59,10 @@ on:
         description: Regex whose first group is the Workshop item id inside version_file, cross-checked against item.json. Empty disables the check.
         type: string
         default: '^remote_file_id="([0-9]+)"'
+      changelog_file:
+        description: Markdown changelog whose "## <version>" section becomes the change note.
+        type: string
+        default: CHANGELOG.md
       release_on:
         description: 'What counts as a release: "version" (the version line changed) or "tag" (a tag was pushed).'
         type: string
@@ -67,6 +76,8 @@ on:
         required: false
       STEAM_CONFIG_VDF:
         required: false
+      DISCORD_WEBHOOK_URL:
+        required: false
 
 permissions:
   contents: read
@@ -77,6 +88,7 @@ jobs:
     outputs:
       mode: ${{ steps.decide.outputs.mode }}
       version: ${{ steps.decide.outputs.version }}
+      changed: ${{ steps.decide.outputs.changed }}
     steps:
       # Full history: the release decision compares against the commit the push
       # started from, which is not always HEAD^, and tag releases need tags.
@@ -246,6 +258,15 @@ jobs:
           if (!before || /^0+$/.test(before) || !has(before)) before = has("HEAD^") ? "HEAD^" : "";
           const listingTouched = before !== "" && (git(["diff", "--name-only", before, "HEAD", "--", workshopDir]) || "").trim() !== "";
 
+          // The version test on its own, event aside, so a pull request that
+          // bumps the version has its changelog section checked before it merges.
+          let previous = "";
+          let bumped = false;
+          if (releaseOn === "version" && versionFile && before) {
+            previous = value(git(["show", `${before}:${versionFile}`]));
+            bumped = version !== previous;
+          }
+
           let mode = "none";
           let why = "";
           if (forced === "validate") {
@@ -279,8 +300,7 @@ jobs:
           } else if (!before) {
             why = "No earlier commit to compare the version against, so nothing is published.";
           } else {
-            const previous = value(git(["show", `${before}:${versionFile}`]));
-            if (version !== previous) {
+            if (bumped) {
               mode = "release";
               why = `Version went ${previous || "none"} -> ${version}, publishing.`;
             } else if (listingTouched) {
@@ -292,10 +312,56 @@ jobs:
           }
 
           console.log(why);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nmode=${mode}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nmode=${mode}\nchanged=${bumped || mode === "release"}\n`);
           if (process.env.GITHUB_STEP_SUMMARY) {
             fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `**${mode}** — ${why}\n`);
           }
+          NODE
+
+      # Only a release needs a changelog entry. Everything else merges without
+      # touching the changelog. A pull request that bumps the version is
+      # checked too, so the section is there before the merge that publishes.
+      - name: Check the changelog
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const version = process.env.VERSION;
+          const file = process.env.CHANGELOG_FILE;
+          if (!fs.existsSync(file)) {
+            console.log(`::error::the version changed to ${version} but there is no ${file}`);
+            process.exit(1);
+          }
+          // A section runs from `## <version>` (anything after the version on
+          // that line, a date say, is ignored) to the next `## ` or the end.
+          // A leading v on either side is not worth failing a release over.
+          const section = (text, want) => {
+            const bare = (v) => v.replace(/^v/i, "");
+            let body = null;
+            for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+              const head = line.match(/^## +(\S+)/);
+              if (head) {
+                if (body) break;
+                if (bare(head[1]) === bare(want)) body = [];
+                continue;
+              }
+              if (body) body.push(line);
+            }
+            return body ? body.join("\n").trim() : null;
+          };
+          const body = section(fs.readFileSync(file, "utf8"), version);
+          if (body === null) {
+            console.log(`::error::${file} has no "## ${version}" section, so release ${version} has no change note`);
+            process.exit(1);
+          }
+          if (!body) {
+            console.log(`::error::the "## ${version}" section of ${file} is empty`);
+            process.exit(1);
+          }
+          console.log(`ok: ${file} describes ${version} in ${body.length} chars`);
           NODE
 
   publish:
@@ -310,11 +376,9 @@ jobs:
       group: workshop-${{ inputs.app_id }}-${{ github.repository }}
       cancel-in-progress: false
     steps:
-      # Full history: the change notes are built from every commit since the
-      # previous release.
+      # A shallow checkout is enough: the change note is read out of the
+      # changelog in the tree, not walked out of the history.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
 
       - name: Check the Steam credentials exist
         env:
@@ -349,12 +413,8 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
           CONTENT_DIR: ${{ inputs.content_dir }}
           PREVIEW_FILE: ${{ inputs.preview_file }}
-          VERSION_FILE: ${{ inputs.version_file }}
-          VERSION_PATTERN: ${{ inputs.version_pattern }}
           WORKSHOP_DIR: ${{ inputs.workshop_dir }}
-          RELEASE_ON: ${{ inputs.release_on }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
           VERSION: ${{ needs.validate.outputs.version }}
           MODE: ${{ needs.validate.outputs.mode }}
         run: |
@@ -362,48 +422,63 @@ jobs:
           node <<'NODE'
           const fs = require("fs");
           const path = require("path");
-          const { execFileSync } = require("child_process");
 
           const version = process.env.VERSION;
           const release = process.env.MODE === "release";
-          const versionFile = process.env.VERSION_FILE;
           const workshopDir = process.env.WORKSHOP_DIR;
-          let re;
-          try { re = new RegExp(process.env.VERSION_PATTERN, "m"); }
-          catch (e) { console.log(`::error::version_pattern is not a valid regex: ${e.message}`); process.exit(1); }
 
-          // stderr is dropped: reaching past the root commit is an expected miss, not news.
-          const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
-          const versionAt = (rev) => { const t = git(["show", `${rev}:${versionFile}`]); return ((t && (t.match(re) || [])[1]) || "").trim(); };
-
-          // The release notes cover every commit since the previous release.
-          let range = ["-1"];
-          if (process.env.RELEASE_ON === "tag" && process.env.REF_TYPE === "tag") {
-            const previousTag = (git(["describe", "--tags", "--abbrev=0", `${process.env.REF_NAME}^`]) || "").trim();
-            if (previousTag) range = [`${previousTag}..HEAD`];
-          } else if (versionFile) {
-            // Walk the history of the version file backwards, past the commits
-            // that already carry this version, to the commit that introduced
-            // the one before it.
-            const touched = (git(["log", "--format=%H", "HEAD", "--", versionFile]) || "").trim().split("\n").filter(Boolean);
-            for (const commit of touched) {
-              if (versionAt(commit) === version) continue;
-              if (versionAt(commit) !== versionAt(`${commit}^`)) { range = [`${commit}..HEAD`]; break; }
+          // The change note is the changelog section for this version.
+          // Validation has already refused a release without one, so this only
+          // runs when the section is there.
+          const section = (text, want) => {
+            const bare = (v) => v.replace(/^v/i, "");
+            let body = null;
+            for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+              const head = line.match(/^## +(\S+)/);
+              if (head) {
+                if (body) break;
+                if (bare(head[1]) === bare(want)) body = [];
+                continue;
+              }
+              if (body) body.push(line);
             }
-          }
-          const subjects = (git(["log", "--no-merges", "--format=%s", ...range]) || "")
-            .split("\n").map((s) => s.trim()).filter(Boolean);
+            return body ? body.join("\n").trim() : "";
+          };
+
+          // Markdown to BBCode, deliberately small: bold, italic, links, code
+          // spans stripped of their backticks, `###` subsections as bold lines
+          // and each run of bullets as one [list].
+          const inline = (s) => s
+            .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "[url=$2]$1[/url]")
+            .replace(/\*\*([^*]+)\*\*/g, "[b]$1[/b]")
+            .replace(/(?<![\w*])\*([^*]+)\*(?![\w*])/g, "[i]$1[/i]")
+            .replace(/(?<![\w_])_([^_]+)_(?![\w_])/g, "[i]$1[/i]")
+            .replace(/`([^`]+)`/g, "$1");
+
+          const bbcode = (markdown) => {
+            const out = [];
+            let list = null;
+            const flush = () => { if (list) { out.push("[list]", ...list, "[/list]"); list = null; } };
+            for (const raw of markdown.split("\n")) {
+              const line = raw.trimEnd();
+              const bullet = line.match(/^\s*[-*] +(.*)$/);
+              if (bullet) { (list = list || []).push(`[*]${inline(bullet[1])}`); continue; }
+              flush();
+              const head = line.match(/^#{1,6} +(.*)$/);
+              if (head) { out.push(`[b]${inline(head[1])}[/b]`); continue; }
+              if (!line.trim()) { if (out.length && out[out.length - 1] !== "") out.push(""); continue; }
+              out.push(inline(line));
+            }
+            flush();
+            return out.join("\n").trim();
+          };
 
           let changenote = `v${version}`;
-          const items = [];
-          let budget = 8000 - changenote.length - "\n[list]\n[/list]".length;
-          for (const subject of subjects) {
-            const line = `[*]${subject}\n`;
-            if (line.length > budget) break;
-            items.push(line);
-            budget -= line.length;
+          if (release) {
+            const markdown = section(fs.readFileSync(process.env.CHANGELOG_FILE, "utf8"), version);
+            fs.writeFileSync("changelog-section.md", markdown);
+            changenote = `${changenote}\n${bbcode(markdown)}`.trim();
           }
-          if (items.length) changenote += `\n[list]\n${items.join("")}[/list]`;
 
           // SteamCMD does NOT process escape sequences in workshop_build_item:
           // a `\n` written into the manifest reaches the Workshop as those two
@@ -442,7 +517,7 @@ jobs:
           const body = Object.entries(fields).map(([k, v]) => `\t"${k}"\t"${v}"`).join("\n");
           fs.writeFileSync("item.vdf", `"workshopitem"\n{\n${body}\n}\n`);
           fs.writeFileSync("expected-description.txt", description);
-          console.log(`${release ? "release" : "listing update"}: item ${id}, "${title}", ${description.length} chars of description${release ? `, ${items.length} change note entries` : ""}`);
+          console.log(`${release ? "release" : "listing update"}: item ${id}, "${title}", ${description.length} chars of description${release ? `, ${changenote.length} chars of change note` : ""}`);
           NODE
 
       - name: Upload to the Steam Workshop
@@ -459,6 +534,50 @@ jobs:
             echo "::error::SteamCMD did not report success. If it asked for a Steam Guard code, the STEAM_CONFIG_VDF session has expired and needs re-priming."
             exit 1
           fi
+
+      # The release is already out, so nothing here may fail the job. Discord
+      # renders Markdown, so the announcement carries the changelog section as
+      # it is written, with only the `###` subsection headings made bold.
+      - name: Announce the release on Discord
+        if: needs.validate.outputs.mode == 'release'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          WORKSHOP_DIR: ${{ inputs.workshop_dir }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const webhook = process.env.DISCORD_WEBHOOK_URL || "";
+          (async () => {
+            if (!webhook) {
+              console.log("::notice::DISCORD_WEBHOOK_URL is not set, so the release was not announced.");
+              return;
+            }
+            const item = JSON.parse(fs.readFileSync(`${process.env.WORKSHOP_DIR}/item.json`, "utf8"));
+            const id = String(item.publishedfileid);
+            let body = fs.readFileSync("changelog-section.md", "utf8").replace(/^#{1,6} +(.*)$/gm, "**$1**").trim();
+            if (body.length > 4000) body = body.slice(0, 3999) + "…";
+            const payload = {
+              embeds: [{
+                title: `${item.title} v${process.env.VERSION}`,
+                url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`,
+                description: body,
+                color: 3447003,
+              }],
+            };
+            try {
+              const res = await fetch(webhook, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              if (res.ok) console.log(`Announced ${item.title} v${process.env.VERSION} on Discord.`);
+              else console.log(`::warning::Discord answered ${res.status}, so the release was not announced.`);
+            } catch {
+              console.log("::warning::The Discord webhook could not be reached, so the release was not announced.");
+            }
+          })();
+          NODE
 
       # Best effort. Steam only serves details for publicly readable items, so a
       # hidden or unlisted item simply skips the comparison.

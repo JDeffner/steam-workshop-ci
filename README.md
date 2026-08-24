@@ -15,7 +15,7 @@ every step below names the general rule next to it.
 | The event | The outcome |
 |---|---|
 | Pull request | The tree and the metadata are validated. Nothing is uploaded. |
-| Push to `main`, version line changed | **Release.** Content folder, preview image and a change note built from the commits since the last release. |
+| Push to `main`, version line changed | **Release.** Content folder, preview image and a change note taken from the changelog section for that version. |
 | Push to `main`, metadata folder changed, version unchanged | **Listing update.** Title and description only. No content, no change note, so Steam records no new update entry. |
 | Push to `main`, neither changed | Nothing. |
 | Push of a tag, with `release_on: tag` | **Release.** |
@@ -65,6 +65,7 @@ workshop/                     never uploaded as files, only read
   description.bbcode          the listing body, Steam BBCode, 8000 chars max
   german/title.txt            optional localized listing
   german/description.bbcode
+CHANGELOG.md                  the change note for each version
 .github/workflows/ci.yml      the caller, below
 ```
 
@@ -121,6 +122,7 @@ jobs:
     secrets:
       STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
       STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 ```
 
 `app_id` and `content_dir` are the only required inputs. `version_pattern`
@@ -177,6 +179,7 @@ is published.` That line is a normal outcome, not a failure.
 | `version_file` | no | *(none)* | The file holding the version line. Required when `release_on` is `version`. |
 | `version_pattern` | no | `^version="(.*)"` | Regex, matched multiline, whose first group is the version. |
 | `id_pattern` | no | `^remote_file_id="([0-9]+)"` | Regex whose first group is the item id inside `version_file`, cross-checked against `item.json`. Empty disables the check. |
+| `changelog_file` | no | `CHANGELOG.md` | The Markdown changelog whose `## <version>` section becomes the change note. |
 | `release_on` | no | `version` | `version` or `tag` — what counts as a release. |
 | `mode` | no | `auto` | `auto`, `release`, `listing` or `validate`. Overrides the decision. |
 
@@ -261,18 +264,61 @@ error. Everything else is the caller's call.
 
 ## Change notes
 
-The change note covers every commit since the previous release, as a BBCode
-`[list]` under a `v<version>` heading.
+The changelog is the one source of release notes. `changelog_file` says where
+it is; by default that is `CHANGELOG.md` at the repository root, in Keep a
+Changelog style:
 
-With `release_on: version`, the workflow walks the history of the version file
-backwards — past the commits that already carry the current version — to the
-commit that introduced the previous one, and lists the non-merge commit subjects
-after it. With `release_on: tag`, the range is the previous tag to the tag being
-pushed. With neither, it falls back to the subject of the last commit. The note
-is capped at Steam's 8000 characters, and a listing update sends none at all.
+```markdown
+# Changelog
 
-Commit subjects become public release notes. That is worth remembering while
-writing them.
+## 1.1.0 - 2026-08-21
+### Added
+- Record Their Name asks which records to write to.
+### Fixed
+- The die no longer renders as a black blob.
+
+## 1.0.0 - 2026-08-19
+- First release.
+```
+
+A section starts at `## <version>`. The first token of that line is the
+version and everything after it (the date) is ignored. A leading `v` on either
+side is ignored too, so `## v1.1.0` matches version `1.1.0`. The section runs
+to the next `## ` or to the end of the file. The `### Added|Changed|Fixed|Removed`
+subsections are optional; a plain bullet list is just as good.
+
+**A release whose version has no section fails validation.** When a release is
+on the cards, CI requires a section for exactly that version with a non-empty
+body, and says so with an `::error::` when there is none. A pull request that
+bumps the version is checked the same way, so the section is there before the
+merge that publishes. When the version did not change, the changelog is not
+looked at and ordinary commits merge freely.
+
+The section is then converted to BBCode, prefixed with a `v<version>` line, and
+sent as the Workshop change note (capped at Steam's 8000 characters). The
+conversion is deliberately small:
+
+| Markdown | BBCode |
+|---|---|
+| `### Added` | `[b]Added[/b]` |
+| a run of `- ` or `* ` lines | one `[list]` of `[*]` items |
+| `**bold**` | `[b]bold[/b]` |
+| `_italic_`, `*italic*` | `[i]italic[/i]` |
+| `` `code` `` | the text, backticks removed |
+| `[text](url)` | `[url=url]text[/url]` |
+| a blank line | a single blank line |
+
+A listing update sends no change note at all.
+
+## Discord announcements
+
+After a successful release, and only for a release, the workflow posts one
+embed to the webhook in `DISCORD_WEBHOOK_URL`: the item title with the new
+version, a link to the Workshop page, and the changelog section as Markdown
+(Discord renders it, so the bullets survive and the `###` headings become bold
+lines), truncated at 4000 characters. Without the secret the step prints a
+notice and skips. A webhook that refuses the post only warns, since the release
+has already happened.
 
 ## Localized listings
 
@@ -324,6 +370,17 @@ so it reuses a session you create once on your own machine.
 These sessions expire. When a publish fails with a Steam Guard message, repeat
 the steps and replace `STEAM_CONFIG_VDF`.
 
+A third secret, `DISCORD_WEBHOOK_URL`, is optional and only drives the
+announcement. Create the webhook in the channel it should post to (Server
+settings, then Integrations, then Webhooks), copy its URL and store it:
+
+```
+gh secret set DISCORD_WEBHOOK_URL -R JDeffner/<repo> --body "<url>"
+```
+
+Anyone holding that URL can post to the channel, so keep it a secret and never
+echo it in a step.
+
 ## Pointing it at a different game
 
 Four things change, and only four:
@@ -360,7 +417,8 @@ against Steam's public API. Any AppID whose Workshop accepts a SteamCMD
 The workflow reads the calling repository's checkout and the two secrets. It
 sends the content folder, the preview image and the listing text to Steam
 through SteamCMD, and after a publish it reads the item back from Steam's public
-API to compare the description. It talks to nothing else.
+API to compare the description. When `DISCORD_WEBHOOK_URL` is set it also posts
+the release announcement to that webhook. It talks to nothing else.
 
 `STEAM_CONFIG_VDF` is a logged-in Steam session and grants full access to that
 account, not just to Workshop uploads. Put it only in repositories you control,
@@ -424,14 +482,24 @@ with:
   version_file: mod/descriptor.mod
 ```
 
-Behaviour changes beyond the inputs, all of them in the caller's favour:
+**Every repository now needs a changelog.** The change note used to be built
+from commit subjects; it is now the `## <version>` section of `CHANGELOG.md`,
+and a release whose version has no section fails validation instead of
+publishing. Write the section for the version you are about to release before
+you bump it — a pull request that bumps the version is checked too, so the gap
+shows up before the merge rather than after it.
+
+Behaviour changes beyond that, all of them in the caller's favour:
 
 - A release is now detected across a whole push rather than against the previous
   commit alone. A push whose version bump is not the tip commit used to be
   missed, and published nothing.
+- Only the default branch publishes, checked by the workflow itself.
+- Uploads for one item queue instead of running at once.
 - `preview_file` may be omitted, which leaves the item's existing image alone.
 - The metadata folder is `workshop_dir` and no longer hardcoded.
 - `release_on: tag` and the `mode` override are new.
+- An optional `DISCORD_WEBHOOK_URL` secret announces each release.
 
 The repository name is cosmetic — callers reference the workflow by path, so
 renaming it would only break existing `uses:` lines, never any behaviour.
