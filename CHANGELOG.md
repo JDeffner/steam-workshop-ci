@@ -13,6 +13,8 @@ these sections describe.
 - `release_on: tag` and the `mode` override.
 - Change notes taken from this changelog, and an optional Discord announcement
   posted as a full-width message, or as an embed with `discord_format: embed`.
+- `tools/preview-discord.js`, which posts an announcement to a webhook without
+  cutting a release, and a CI check keeping it in step with the workflow.
 
 ### Fixed
 - A release is detected across a whole push rather than against `HEAD^` alone.

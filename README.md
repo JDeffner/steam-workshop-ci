@@ -69,6 +69,10 @@ CHANGELOG.md                  the change note for each version
 .github/workflows/ci.yml      the caller, below
 ```
 
+(`tools/` in *this* repository holds the preview helper described under
+[Discord announcements](#discord-announcements); a mod repository needs no such
+folder.)
+
 Both folder names are inputs. A RimWorld repo can call them `Mod/` and `steam/`;
 nothing cares as long as the paths match what the caller passes.
 
@@ -389,6 +393,39 @@ The value is checked during validation, alongside `mode` and `release_on`, so a
 typo fails the pull request rather than surfacing as the wrong shape after a
 release has already gone out.
 
+### Seeing it before you release
+
+The workflow only announces after a real Steam upload, which is an awkward way
+to find out that a message looked wrong. `tools/preview-discord.js` posts the
+same payloads to a webhook of your choosing, from a checkout, without releasing
+anything:
+
+```
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...   node tools/preview-discord.js
+```
+
+Run it from a mod repository's root; it reads that repository's `CHANGELOG.md`
+and `workshop/item.json`, exactly as the workflow does. With no arguments it
+sends both shapes, so you can compare them in the channel and pick one.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--format` | `both` | `message`, `embed` or `both`. |
+| `--section` | newest | Which changelog version to announce. |
+| `--changelog` | `CHANGELOG.md` | Where to read the notes from. |
+| `--workshop-dir` | `workshop` | Where to read `item.json` from. |
+
+Point it at a webhook on a server nobody minds you posting to. The URL is a
+bearer credential — anyone holding it can post to that channel — so pass it in
+the environment rather than on the command line, where it would be written to
+your shell history.
+
+The tool and the workflow cannot share this code: a reusable workflow's `run:`
+steps see the calling repository's checkout, not this one, which is why the
+announce step is written inline. So the two copies are compared by this
+repository's own CI instead, and a change to one without the other fails the
+build.
+
 ## Localized listings
 
 Steam shows a Workshop title and description per language. Put each one in
@@ -578,11 +615,12 @@ renaming it would only break existing `uses:` lines, never any behaviour.
 
 This repository is other repositories' quality gate, so it has one of its
 own in `.github/workflows/ci.yml`. It runs `actionlint` (with `shellcheck`,
-which reads the `run:` bodies) on every change, and on a pull request it calls
-`mod-ci.yml` against the fixture in `mod/` and `workshop/`. That fixture is
-why a workflow repository carries a mod tree: it is a self test, not a mod,
-and it is never uploaded. The self-test job stays off pushes, because a
-fixture version bump would send the publish job at Steam.
+which reads the `run:` bodies) on every change, checks that
+`tools/preview-discord.js` still builds the same payloads as the announce step,
+and on a pull request it calls `mod-ci.yml` against the fixture in `mod/` and
+`workshop/`. That fixture is why a workflow repository carries a mod tree: it
+is a self test, not a mod, and it is never uploaded. The self-test job stays
+off pushes, because a fixture version bump would send the publish job at Steam.
 
 ## License
 

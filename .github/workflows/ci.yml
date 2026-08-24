@@ -31,6 +31,62 @@ jobs:
           # The runner already has shellcheck, so the run: bodies are linted too.
           actionlint -color
 
+  # tools/preview-discord.js exists so the announcement can be seen without
+  # cutting a release, which only helps while it builds what the workflow
+  # builds. The logic cannot be shared — a reusable workflow's run: steps see
+  # the caller's checkout, not this repository — so CI compares the two copies
+  # instead.
+  discord-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: The preview tool and the workflow build the same payloads
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          // Comments and indentation are free to differ; the code is not.
+          const normalise = (text) => text
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line && !line.startsWith("//"))
+            .join("\n");
+
+          const between = (text, from, to, what) => {
+            const i = text.indexOf(from);
+            const j = text.indexOf(to, i + 1);
+            if (i === -1 || j === -1) {
+              console.log(`::error::could not find the payload builders in ${what}. If they moved, this check needs its markers updated.`);
+              process.exit(1);
+            }
+            return normalise(text.slice(i, j));
+          };
+
+          const workflow = between(
+            fs.readFileSync(".github/workflows/mod-ci.yml", "utf8"),
+            "const fit = (text, room)", "const format = process.env.DISCORD_FORMAT",
+            "mod-ci.yml");
+          const tool = between(
+            fs.readFileSync("tools/preview-discord.js", "utf8"),
+            "const fit = (text, room)", "// ----", "preview-discord.js");
+
+          if (workflow === tool) {
+            console.log("ok: the preview tool and the announce step build identical payloads");
+          } else {
+            const a = workflow.split("\n"), b = tool.split("\n");
+            for (let i = 0; i < Math.max(a.length, b.length); i++) {
+              if (a[i] !== b[i]) {
+                console.log(`::error::tools/preview-discord.js has drifted from the announce step in mod-ci.yml.`);
+                console.log(`  mod-ci.yml:         ${a[i] ?? "(nothing)"}`);
+                console.log(`  preview-discord.js: ${b[i] ?? "(nothing)"}`);
+                break;
+              }
+            }
+            process.exit(1);
+          }
+          NODE
+
   # Only on a pull request: a push would let the fixture version decide a
   # release and send the publish job at Steam with credentials this repository
   # does not have. On a pull request the mode is always "none".
