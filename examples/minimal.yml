@@ -3,6 +3,9 @@
 #
 # Releases are driven by the version line in mod/descriptor.mod. Without a
 # version file, see tag-release.yml instead.
+# Every release needs a "## <version>" section in CHANGELOG.md: that section
+# becomes the Workshop change note, and a release without one fails.
+#
 name: CI
 
 on:

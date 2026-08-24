@@ -5,6 +5,9 @@
 #
 # The manual run offers the three modes, so a release can also be forced by
 # hand from the Actions tab.
+# Every release needs a "## <version>" section in CHANGELOG.md: that section
+# becomes the Workshop change note, and a release without one fails.
+#
 name: CI
 
 on:

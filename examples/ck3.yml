@@ -7,6 +7,9 @@
 #
 # Bumping version="" and pushing to main publishes. Editing workshop/ without
 # touching the version updates the listing text only.
+#
+# Every release needs a "## <version>" section in CHANGELOG.md: that section
+# becomes the Workshop change note, and a release without one fails.
 name: CI
 
 on:
@@ -28,3 +31,5 @@ jobs:
     secrets:
       STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
       STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+      # Optional: announces each release in a Discord channel.
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
