@@ -22,7 +22,7 @@
 # The change note comes from the changelog: the section whose heading carries
 # the version being released, converted from Markdown to BBCode. A release
 # whose version has no section fails validation. After a successful release the
-# same section is announced on Discord, when DISCORD_WEBHOOK_URL is set.
+# same section is posted to Discord, when DISCORD_WEBHOOK_URL is set.
 #
 # Localized listings in <workshop_dir>/<language>/ are validated but never
 # uploaded. Steam offers no headless way to set them (see the README).
@@ -535,9 +535,12 @@ jobs:
             exit 1
           fi
 
-      # The release is already out, so nothing here may fail the job. Discord
-      # renders Markdown, so the announcement carries the changelog section as
-      # it is written, with only the `###` subsection headings made bold.
+      # The release is already out, so nothing here may fail the job.
+      #
+      # The announcement is a plain message, not an embed: an embed is pinned
+      # to a narrow column on the desktop client, while message content uses
+      # the full width of the channel. Discord renders Markdown in content, so
+      # the changelog section goes out very nearly as it is written.
       - name: Announce the release on Discord
         if: needs.validate.outputs.mode == 'release'
         env:
@@ -554,24 +557,58 @@ jobs:
               return;
             }
             const item = JSON.parse(fs.readFileSync(`${process.env.WORKSHOP_DIR}/item.json`, "utf8"));
-            const id = String(item.publishedfileid);
-            let body = fs.readFileSync("changelog-section.md", "utf8").replace(/^#{1,6} +(.*)$/gm, "**$1**").trim();
-            if (body.length > 4000) body = body.slice(0, 3999) + "…";
-            const payload = {
-              embeds: [{
-                title: `${item.title} v${process.env.VERSION}`,
-                url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`,
-                description: body,
-                color: 3447003,
-              }],
-            };
+            const url = `https://steamcommunity.com/sharedfiles/filedetails/?id=${String(item.publishedfileid)}`;
+
+            // Discord's own Markdown is close enough to the changelog's that
+            // headings, bullets, bold, italics and code spans need no work at
+            // all. Three things do:
+            //   - Discord stops at `###`, so deeper headings are flattened.
+            //   - Every link is wrapped in <> so the client adds no preview
+            //     card underneath, which is the embed we are trying to avoid.
+            // Code spans and fenced blocks are held out of the link rewriting:
+            // a URL written as `https://…` is being shown, not linked, and
+            // wrapping it would only put visible angle brackets in the code.
+            // Splitting on a capturing group puts the code on the odd indices.
+            const links = (text) => text
+              .replace(/\[([^\]]+)\]\(\s*<?([^)\s>]+)>?\s*\)/g, "[$1](<$2>)")
+              // Sentence punctuation after a bare URL is not part of it.
+              .replace(/(?<![<(])\bhttps?:\/\/[^\s<>()]+/g, (u) => {
+                const tail = (u.match(/[.,;:!?]+$/) || [""])[0];
+                return `<${u.slice(0, u.length - tail.length)}>${tail}`;
+              });
+            const discord = (markdown) => markdown
+              .replace(/^(\s*)#{4,} +/gm, "$1### ")
+              .split(/(```[\s\S]*?```|`[^`\n]*`)/)
+              .map((part, i) => (i % 2 ? part : links(part)))
+              .join("")
+              .trim();
+
+            const head = `## ${item.title} v${process.env.VERSION}`;
+            const foot = `-# [View on the Steam Workshop](<${url}>)`;
+            // Content is capped at 2000 characters, so the body is what gives.
+            // Cut on a line boundary: half a bullet reads like a bug.
+            const room = 2000 - head.length - foot.length - "\n\n\n\n…\n".length;
+            let body = discord(fs.readFileSync("changelog-section.md", "utf8"));
+            if (body.length > room) {
+              const cut = body.slice(0, room);
+              const nl = cut.lastIndexOf("\n");
+              body = `${(nl > 0 ? cut.slice(0, nl) : cut).trimEnd()}\n…`;
+            }
+            const content = `${head}\n\n${body}\n\n${foot}`;
+
             try {
               const res = await fetch(webhook, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify(payload),
+                body: JSON.stringify({
+                  content,
+                  // A changelog is repository text. Nothing in it may ping a
+                  // channel, and no stray URL may grow a preview card.
+                  allowed_mentions: { parse: [] },
+                  flags: 4,
+                }),
               });
-              if (res.ok) console.log(`Announced ${item.title} v${process.env.VERSION} on Discord.`);
+              if (res.ok) console.log(`Announced ${item.title} v${process.env.VERSION} on Discord, ${content.length} chars.`);
               else console.log(`::warning::Discord answered ${res.status}, so the release was not announced.`);
             } catch {
               console.log("::warning::The Discord webhook could not be reached, so the release was not announced.");

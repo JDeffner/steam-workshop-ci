@@ -11,7 +11,8 @@ these sections describe.
   release on a version bump, a listing update when only the metadata changed.
 - Localized Workshop listings, validated but never uploaded.
 - `release_on: tag` and the `mode` override.
-- Change notes taken from this changelog, and an optional Discord announcement.
+- Change notes taken from this changelog, and an optional Discord announcement
+  posted as a full-width message rather than an embed.
 
 ### Fixed
 - A release is detected across a whole push rather than against `HEAD^` alone.

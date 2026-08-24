@@ -312,13 +312,45 @@ A listing update sends no change note at all.
 
 ## Discord announcements
 
-After a successful release, and only for a release, the workflow posts one
-embed to the webhook in `DISCORD_WEBHOOK_URL`: the item title with the new
-version, a link to the Workshop page, and the changelog section as Markdown
-(Discord renders it, so the bullets survive and the `###` headings become bold
-lines), truncated at 4000 characters. Without the secret the step prints a
-notice and skips. A webhook that refuses the post only warns, since the release
-has already happened.
+After a successful release, and only for a release, the workflow posts the
+changelog section to the webhook in `DISCORD_WEBHOOK_URL`.
+
+It is a **plain message, not an embed.** An embed is pinned to a narrow column
+on the desktop client whatever the window is doing, while ordinary message
+content runs the full width of the channel — which is what a bullet list of
+changes wants. The message looks like this:
+
+```
+## Better Bastards v1.4.2
+
+### Added
+- A **new** court position, the *Master of Hounds*
+- `remote_file_id` is cross-checked against the listing
+
+### Fixed
+- Kennels no longer vanish on succession
+
+-# [View on the Steam Workshop](<…>)
+```
+
+Discord renders Markdown in message content, so the section goes out very
+nearly as it is written in the changelog — headings, bullets, bold, italics and
+code spans all survive untouched. Three things are adjusted on the way:
+
+- Discord's headings stop at `###`, so `####` and deeper are flattened to it.
+- Every link is wrapped in `<…>`, which stops the client from hanging a preview
+  card underneath — that card would be the embed this is avoiding. Links inside
+  code spans and fenced blocks are left alone, since they are being shown
+  rather than linked, and sentence punctuation after a bare URL stays outside
+  the link.
+- Message content is capped at 2000 characters, rather than the 4096 an embed
+  description allows. A longer section is cut on a line boundary and marked
+  with an `…`, so the message never ends mid-bullet.
+
+Nothing in a changelog can ping the channel: the post sends
+`allowed_mentions: {"parse": []}`, so an `@everyone` in the text renders as
+text. Without the secret the step prints a notice and skips. A webhook that
+refuses the post only warns, since the release has already happened.
 
 ## Localized listings
 
@@ -499,7 +531,8 @@ Behaviour changes beyond that, all of them in the caller's favour:
 - `preview_file` may be omitted, which leaves the item's existing image alone.
 - The metadata folder is `workshop_dir` and no longer hardcoded.
 - `release_on: tag` and the `mode` override are new.
-- An optional `DISCORD_WEBHOOK_URL` secret announces each release.
+- An optional `DISCORD_WEBHOOK_URL` secret announces each release, as a
+  full-width message rather than an embed.
 
 The repository name is cosmetic — callers reference the workflow by path, so
 renaming it would only break existing `uses:` lines, never any behaviour.
