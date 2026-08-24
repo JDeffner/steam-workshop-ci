@@ -1,0 +1,30 @@
+# A Crusader Kings III mod: the Paradox descriptor carries both the version
+# that triggers a release and the item id that gets cross-checked against
+# workshop/item.json.
+#
+#   mod/descriptor.mod   version="1.4.2"
+#                        remote_file_id="3012345678"
+#
+# Bumping version="" and pushing to main publishes. Editing workshop/ without
+# touching the version updates the listing text only.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@main
+    with:
+      app_id: "1158310"
+      content_dir: mod
+      preview_file: mod/thumbnail.png
+      version_file: mod/descriptor.mod
+      version_pattern: '^version="(.*)"'
+      id_pattern: '^remote_file_id="([0-9]+)"'
+    secrets:
+      STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+      STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}

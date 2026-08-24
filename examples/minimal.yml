@@ -1,0 +1,21 @@
+# The smallest caller that works. Drop this in .github/workflows/ci.yml of the
+# repository that holds your Workshop item, and change the two values.
+#
+# Releases are driven by the version line in mod/descriptor.mod. Without a
+# version file, see tag-release.yml instead.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@main
+    with:
+      app_id: "1158310"           # the number in the game's store page URL
+      content_dir: mod            # the folder that gets uploaded
+      version_file: mod/descriptor.mod
+    secrets: inherit
