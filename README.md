@@ -180,6 +180,7 @@ is published.` That line is a normal outcome, not a failure.
 | `version_pattern` | no | `^version="(.*)"` | Regex, matched multiline, whose first group is the version. |
 | `id_pattern` | no | `^remote_file_id="([0-9]+)"` | Regex whose first group is the item id inside `version_file`, cross-checked against `item.json`. Empty disables the check. |
 | `changelog_file` | no | `CHANGELOG.md` | The Markdown changelog whose `## <version>` section becomes the change note. |
+| `discord_format` | no | `message` | `message` or `embed` — the shape of the Discord announcement. |
 | `release_on` | no | `version` | `version` or `tag` — what counts as a release. |
 | `mode` | no | `auto` | `auto`, `release`, `listing` or `validate`. Overrides the decision. |
 
@@ -315,10 +316,10 @@ A listing update sends no change note at all.
 After a successful release, and only for a release, the workflow posts the
 changelog section to the webhook in `DISCORD_WEBHOOK_URL`.
 
-It is a **plain message, not an embed.** An embed is pinned to a narrow column
-on the desktop client whatever the window is doing, while ordinary message
-content runs the full width of the channel — which is what a bullet list of
-changes wants. The message looks like this:
+By default it is a **plain message, not an embed.** An embed is pinned to a
+narrow column on the desktop client whatever the window is doing, while
+ordinary message content runs the full width of the channel — which is what a
+bullet list of changes wants. The message looks like this:
 
 ```
 ## Better Bastards v1.4.2
@@ -351,6 +352,42 @@ Nothing in a changelog can ping the channel: the post sends
 `allowed_mentions: {"parse": []}`, so an `@everyone` in the text renders as
 text. Without the secret the step prints a notice and skips. A webhook that
 refuses the post only warns, since the release has already happened.
+
+### Going back to an embed
+
+Set `discord_format: embed` on the caller when a repo wants the old shape:
+
+```yaml
+with:
+  app_id: "1158310"
+  content_dir: mod
+  discord_format: embed
+```
+
+The embed carries the title and the Workshop link as fields of its own, plus
+the colour bar down the side, and its description may run to 4096 characters
+rather than 2000 — which is the one substantive reason to choose it, if a
+release's notes are genuinely too long for a message.
+
+The changelog is treated differently in each shape, because the two render
+differently:
+
+| | `message` (default) | `embed` |
+|---|---|---|
+| Width | Full channel width | A narrow fixed column |
+| Limit | 2000 characters | 4096 characters |
+| Headings | Kept, flattened to `###` | Turned into bold lines |
+| Links | Wrapped in `<…>` | Left as written |
+| Colour bar | None | Yes |
+
+Headings become bold in the embed rather than staying as headings: `###`
+renders in message content for certain, while embed descriptions are less
+clear-cut, and bold renders in both. An embed grows no preview cards from its
+own description, so links there need no wrapping.
+
+The value is checked during validation, alongside `mode` and `release_on`, so a
+typo fails the pull request rather than surfacing as the wrong shape after a
+release has already gone out.
 
 ## Localized listings
 
@@ -532,7 +569,7 @@ Behaviour changes beyond that, all of them in the caller's favour:
 - The metadata folder is `workshop_dir` and no longer hardcoded.
 - `release_on: tag` and the `mode` override are new.
 - An optional `DISCORD_WEBHOOK_URL` secret announces each release, as a
-  full-width message rather than an embed.
+  full-width message by default or as an embed with `discord_format: embed`.
 
 The repository name is cosmetic — callers reference the workflow by path, so
 renaming it would only break existing `uses:` lines, never any behaviour.

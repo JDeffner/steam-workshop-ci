@@ -63,6 +63,10 @@ on:
         description: Markdown changelog whose "## <version>" section becomes the change note.
         type: string
         default: CHANGELOG.md
+      discord_format:
+        description: 'Shape of the Discord announcement: "message" (full width) or "embed" (a narrow column with a colour bar).'
+        type: string
+        default: message
       release_on:
         description: 'What counts as a release: "version" (the version line changed) or "tag" (a tag was pushed).'
         type: string
@@ -203,6 +207,7 @@ jobs:
           VERSION_PATTERN: ${{ inputs.version_pattern }}
           WORKSHOP_DIR: ${{ inputs.workshop_dir }}
           RELEASE_ON: ${{ inputs.release_on }}
+          DISCORD_FORMAT: ${{ inputs.discord_format }}
           MODE_INPUT: ${{ inputs.mode }}
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
@@ -223,6 +228,11 @@ jobs:
           if (!["auto", "release", "listing", "validate"].includes(forced)) die(`mode must be auto, release, listing or validate, not "${forced}"`);
           const releaseOn = process.env.RELEASE_ON || "version";
           if (!["version", "tag"].includes(releaseOn)) die(`release_on must be version or tag, not "${releaseOn}"`);
+          // Checked here rather than in the announce step: that step runs after
+          // the upload and may never fail the job, so a typo would otherwise
+          // surface as the wrong shape once the release was already out.
+          const discordFormat = process.env.DISCORD_FORMAT || "message";
+          if (!["message", "embed"].includes(discordFormat)) die(`discord_format must be message or embed, not "${discordFormat}"`);
 
           const event = process.env.EVENT_NAME;
           const defaultBranch = process.env.DEFAULT_BRANCH || "";
@@ -537,14 +547,16 @@ jobs:
 
       # The release is already out, so nothing here may fail the job.
       #
-      # The announcement is a plain message, not an embed: an embed is pinned
-      # to a narrow column on the desktop client, while message content uses
-      # the full width of the channel. Discord renders Markdown in content, so
-      # the changelog section goes out very nearly as it is written.
+      # Two shapes, chosen by discord_format. A message is the default: an
+      # embed is pinned to a narrow column on the desktop client whatever the
+      # window is doing, while message content runs the full width of the
+      # channel, which is what a bullet list of changes wants. An embed buys
+      # back a colour bar and Discord's larger description limit.
       - name: Announce the release on Discord
         if: needs.validate.outputs.mode == 'release'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_FORMAT: ${{ inputs.discord_format }}
           WORKSHOP_DIR: ${{ inputs.workshop_dir }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
@@ -558,57 +570,77 @@ jobs:
             }
             const item = JSON.parse(fs.readFileSync(`${process.env.WORKSHOP_DIR}/item.json`, "utf8"));
             const url = `https://steamcommunity.com/sharedfiles/filedetails/?id=${String(item.publishedfileid)}`;
+            const heading = `${item.title} v${process.env.VERSION}`;
+            const markdown = fs.readFileSync("changelog-section.md", "utf8");
 
-            // Discord's own Markdown is close enough to the changelog's that
-            // headings, bullets, bold, italics and code spans need no work at
-            // all. Three things do:
-            //   - Discord stops at `###`, so deeper headings are flattened.
-            //   - Every link is wrapped in <> so the client adds no preview
-            //     card underneath, which is the embed we are trying to avoid.
-            // Code spans and fenced blocks are held out of the link rewriting:
-            // a URL written as `https://…` is being shown, not linked, and
-            // wrapping it would only put visible angle brackets in the code.
-            // Splitting on a capturing group puts the code on the odd indices.
-            const links = (text) => text
+            // Cut on a line boundary and say so: half a bullet reads like a bug.
+            const fit = (text, room) => {
+              if (text.length <= room) return text;
+              const cut = text.slice(0, room - 2);
+              const nl = cut.lastIndexOf("\n");
+              return `${(nl > 0 ? cut.slice(0, nl) : cut).trimEnd()}\n…`;
+            };
+
+            // A message renders Discord's own Markdown, which the changelog is
+            // already written in, so headings, bullets, bold, italics and code
+            // spans need no work. Two things do: Discord's headings stop at
+            // ###, and every link wants <> around it so the client hangs no
+            // preview card underneath — that card is the embed being avoided.
+            // Code spans and fenced blocks are held out of the link rewriting,
+            // since a URL in code is being shown rather than linked.
+            const linkify = (text) => text
               .replace(/\[([^\]]+)\]\(\s*<?([^)\s>]+)>?\s*\)/g, "[$1](<$2>)")
               // Sentence punctuation after a bare URL is not part of it.
               .replace(/(?<![<(])\bhttps?:\/\/[^\s<>()]+/g, (u) => {
                 const tail = (u.match(/[.,;:!?]+$/) || [""])[0];
                 return `<${u.slice(0, u.length - tail.length)}>${tail}`;
               });
-            const discord = (markdown) => markdown
-              .replace(/^(\s*)#{4,} +/gm, "$1### ")
-              .split(/(```[\s\S]*?```|`[^`\n]*`)/)
-              .map((part, i) => (i % 2 ? part : links(part)))
-              .join("")
-              .trim();
+            const asMessage = () => {
+              const body = markdown
+                .replace(/^([ \t]*)#{4,} +/gm, "$1### ")
+                .split(/(```[\s\S]*?```|`[^`\n]*`)/)
+                .map((part, i) => (i % 2 ? part : linkify(part)))
+                .join("")
+                .trim();
+              const head = `## ${heading}`;
+              const foot = `-# [View on the Steam Workshop](<${url}>)`;
+              // Message content is capped at 2000 characters.
+              const room = 2000 - head.length - foot.length - "\n\n\n\n".length;
+              // flags 4 is SUPPRESS_EMBEDS: belt and braces against a preview
+              // card the <> wrapping missed. It suppresses every embed on the
+              // message, so it must not travel with the embed payload below.
+              return { content: `${head}\n\n${fit(body, room)}\n\n${foot}`, flags: 4 };
+            };
 
-            const head = `## ${item.title} v${process.env.VERSION}`;
-            const foot = `-# [View on the Steam Workshop](<${url}>)`;
-            // Content is capped at 2000 characters, so the body is what gives.
-            // Cut on a line boundary: half a bullet reads like a bug.
-            const room = 2000 - head.length - foot.length - "\n\n\n\n…\n".length;
-            let body = discord(fs.readFileSync("changelog-section.md", "utf8"));
-            if (body.length > room) {
-              const cut = body.slice(0, room);
-              const nl = cut.lastIndexOf("\n");
-              body = `${(nl > 0 ? cut.slice(0, nl) : cut).trimEnd()}\n…`;
-            }
-            const content = `${head}\n\n${body}\n\n${foot}`;
+            // An embed carries the title and the link as fields of its own, and
+            // nothing inside it grows a preview card, so links are left as they
+            // are written. Headings become bold: they render in message content
+            // for certain, and bold renders everywhere, so an embed takes the
+            // form that cannot come out as literal hashes.
+            const asEmbed = () => ({
+              embeds: [{
+                title: heading,
+                url,
+                // An embed description is capped at 4096 characters.
+                description: fit(markdown.replace(/^[ \t]*#{1,6} +(.*)$/gm, "**$1**").trim(), 4096),
+                color: 3447003,
+              }],
+            });
 
+            const format = process.env.DISCORD_FORMAT || "message";
+            const payload = format === "embed" ? asEmbed() : asMessage();
             try {
               const res = await fetch(webhook, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({
-                  content,
-                  // A changelog is repository text. Nothing in it may ping a
-                  // channel, and no stray URL may grow a preview card.
+                  ...payload,
+                  // A changelog is repository text, so nothing in it may ping
+                  // a channel, whichever shape it goes out in.
                   allowed_mentions: { parse: [] },
-                  flags: 4,
                 }),
               });
-              if (res.ok) console.log(`Announced ${item.title} v${process.env.VERSION} on Discord, ${content.length} chars.`);
+              if (res.ok) console.log(`Announced ${heading} on Discord as ${format === "embed" ? "an embed" : "a message"}.`);
               else console.log(`::warning::Discord answered ${res.status}, so the release was not announced.`);
             } catch {
               console.log("::warning::The Discord webhook could not be reached, so the release was not announced.");

@@ -12,7 +12,7 @@ these sections describe.
 - Localized Workshop listings, validated but never uploaded.
 - `release_on: tag` and the `mode` override.
 - Change notes taken from this changelog, and an optional Discord announcement
-  posted as a full-width message rather than an embed.
+  posted as a full-width message, or as an embed with `discord_format: embed`.
 
 ### Fixed
 - A release is detected across a whole push rather than against `HEAD^` alone.
