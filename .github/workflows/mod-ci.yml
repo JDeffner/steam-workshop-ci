@@ -197,6 +197,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           BEFORE_SHA: ${{ github.event.before }}
           SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           node <<'NODE'
           const fs = require("fs");
@@ -212,9 +213,14 @@ jobs:
           if (!["version", "tag"].includes(releaseOn)) die(`release_on must be version or tag, not "${releaseOn}"`);
 
           const event = process.env.EVENT_NAME;
+          const defaultBranch = process.env.DEFAULT_BRANCH || "";
           const workshopDir = process.env.WORKSHOP_DIR;
           const versionFile = process.env.VERSION_FILE;
-          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+          // A caller can pass anything here, so say what is wrong instead of
+          // throwing a stack trace at them.
+          let re;
+          try { re = new RegExp(process.env.VERSION_PATTERN, "m"); }
+          catch (e) { die(`version_pattern is not a valid regex: ${e.message}`); }
           const value = (text) => ((text && (text.match(re) || [])[1]) || "").trim();
 
           if (releaseOn === "version" && !versionFile) {
@@ -255,6 +261,11 @@ jobs:
             why = "Manual run: updating the listing only.";
           } else if (event !== "push") {
             why = `${event} is not a publishing event: validation only.`;
+          } else if (process.env.REF_TYPE === "branch" && defaultBranch && process.env.REF_NAME !== defaultBranch) {
+            // Publishing is the default branch's job, whatever the caller's
+            // `on:` block lets through. Tag pushes are exempt: their ref name
+            // is the tag, and release_on: tag is the point of them.
+            why = `Push to ${process.env.REF_NAME}, not ${defaultBranch}: validation only.`;
           } else if (releaseOn === "tag") {
             if (process.env.REF_TYPE === "tag") {
               mode = "release";
@@ -291,6 +302,13 @@ jobs:
     needs: validate
     if: needs.validate.outputs.mode != 'none'
     runs-on: ubuntu-latest
+    # Two merges minutes apart would otherwise run two SteamCMD uploads
+    # against the same item at once. Queue them instead, and never cancel one:
+    # a half-finished upload is worse than a slow one. The group sits on the
+    # job, not the workflow, so pull request validation still runs in parallel.
+    concurrency:
+      group: workshop-${{ inputs.app_id }}-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       # Full history: the change notes are built from every commit since the
       # previous release.
@@ -350,7 +368,9 @@ jobs:
           const release = process.env.MODE === "release";
           const versionFile = process.env.VERSION_FILE;
           const workshopDir = process.env.WORKSHOP_DIR;
-          const re = new RegExp(process.env.VERSION_PATTERN, "m");
+          let re;
+          try { re = new RegExp(process.env.VERSION_PATTERN, "m"); }
+          catch (e) { console.log(`::error::version_pattern is not a valid regex: ${e.message}`); process.exit(1); }
 
           // stderr is dropped: reaching past the root commit is an expected miss, not news.
           const git = (args) => { try { return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
@@ -390,7 +410,15 @@ jobs:
           // characters. So newlines go in raw and backslashes stay as they are.
           // A double quote would end the value and cannot be escaped either,
           // so quotes become typographic ones, opening and closing by turns.
-          const quotes = (s) => { let n = 0; return String(s).replace(/"/g, () => (n++ % 2 ? "”" : "“")); };
+          // BBCode tags are left alone: `[url="..."]` needs its straight
+          // quotes or Steam renders the tag literally. Splitting on a
+          // capturing group puts the tags on the odd indices.
+          const quotes = (s) => {
+            let n = 0;
+            return String(s).split(/(\[[^\]]*\])/).map((part, i) =>
+              i % 2 ? part : part.replace(/"/g, () => (n++ % 2 ? "”" : "“"))
+            ).join("");
+          };
 
           const item = JSON.parse(fs.readFileSync(`${workshopDir}/item.json`, "utf8"));
           const description = quotes(fs.readFileSync(`${workshopDir}/description.bbcode`, "utf8").replace(/\r\n/g, "\n").trimEnd());
@@ -422,6 +450,10 @@ jobs:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
         run: |
           set -uo pipefail
+          # GitHub already runs this step with `bash -e`, and SteamCMD exits
+          # non-zero on an expired session. Turn errexit off so the hint below
+          # is reachable, and let the grep be the only failure path.
+          set +e
           ~/steamcmd/steamcmd.sh +login "$STEAM_USERNAME" +workshop_build_item "$PWD/item.vdf" +quit | tee steamcmd.log
           if ! grep -q "Success" steamcmd.log; then
             echo "::error::SteamCMD did not report success. If it asked for a Steam Guard code, the STEAM_CONFIG_VDF session has expired and needs re-priming."

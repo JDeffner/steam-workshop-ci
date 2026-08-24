@@ -24,6 +24,15 @@ every step below names the general rule next to it.
 Bumping the version is the release action. That is the whole design: work merges
 freely, and publishing is one deliberate edit.
 
+Only the repository's default branch publishes. The workflow checks that
+itself, so a push to any other branch validates and stops even when the
+caller's `on:` block carries no branch filter. A tag push is exempt, since
+that is the point of `release_on: tag`.
+
+Two uploads never run at once. The publish job queues per item, so merging
+twice in quick succession sends the second upload after the first, and neither
+is cancelled.
+
 ## Before you start
 
 **The Workshop item has to exist already.** This workflow updates an item, it
@@ -381,6 +390,9 @@ raw, leaves backslashes alone, and rewrites double quotes in the title and the
 description as typographic quotes, opening and closing by turns. Write `"` in
 your BBCode if you like; the listing will show `“` and `”`.
 
+Text inside square brackets is left alone, so a tag such as
+`[url="https://example.com"]` keeps its straight quotes and still works.
+
 ## Upgrading from the version with CK3 defaults
 
 The earlier workflow defaulted `app_id` to CK3, `content_dir` to `mod`,
@@ -423,3 +435,18 @@ Behaviour changes beyond the inputs, all of them in the caller's favour:
 
 The repository name is cosmetic — callers reference the workflow by path, so
 renaming it would only break existing `uses:` lines, never any behaviour.
+
+## Self-test
+
+This repository is other repositories' quality gate, so it has one of its
+own in `.github/workflows/ci.yml`. It runs `actionlint` (with `shellcheck`,
+which reads the `run:` bodies) on every change, and on a pull request it calls
+`mod-ci.yml` against the fixture in `mod/` and `workshop/`. That fixture is
+why a workflow repository carries a mod tree: it is a self test, not a mod,
+and it is never uploaded. The self-test job stays off pushes, because a
+fixture version bump would send the publish job at Steam.
+
+## License
+
+GNU General Public License v3.0, the same as the sibling repositories. See
+`LICENSE`.
