@@ -25,7 +25,7 @@ on:
 
 jobs:
   ci:
-    uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@main
+    uses: JDeffner/steam-workshop-ci/.github/workflows/mod-ci.yml@main
     with:
       app_id: "0000000"
       content_dir: content

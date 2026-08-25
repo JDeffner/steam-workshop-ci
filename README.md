@@ -1,14 +1,14 @@
-# ck3-mod-ci
+# steam-workshop-ci
 
 A reusable GitHub Actions workflow that publishes a Steam Workshop item from a
 git repository. Bump a version line, push, and the item updates. Do anything
 else and the Workshop is left alone.
 
-It was written for three Crusader Kings III mods and still carries that name,
-but nothing in the workflow knows what CK3 is. The game is an AppID you pass
-in, the version is a regex you choose, the folder that ships is a path. CK3 is
-the worked example throughout because it is the case that runs in production;
-every step below names the general rule next to it.
+It was written for three Crusader Kings III mods, but nothing in the workflow
+knows what CK3 is. The game is an AppID you pass in, the version is a regex
+you choose, the folder that ships is a path. CK3 is the worked example
+throughout because it is the case that runs in production; every step below
+names the general rule next to it.
 
 ## What happens when
 
@@ -117,7 +117,7 @@ on:
 
 jobs:
   ci:
-    uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@main
+    uses: JDeffner/steam-workshop-ci/.github/workflows/mod-ci.yml@main
     with:
       app_id: "1158310"
       content_dir: mod
@@ -556,60 +556,6 @@ your BBCode if you like; the listing will show `“` and `”`.
 
 Text inside square brackets is left alone, so a tag such as
 `[url="https://example.com"]` keeps its straight quotes and still works.
-
-## Upgrading from the version with CK3 defaults
-
-The earlier workflow defaulted `app_id` to CK3, `content_dir` to `mod`,
-`preview_file` to `mod/thumbnail.png` and `version_file` to
-`mod/descriptor.mod`, so a CK3 caller could pass no inputs at all. Those
-defaults are gone: a workflow that silently uploads to Crusader Kings III is
-the wrong thing to hand somebody modding another game.
-
-Existing callers follow `@main`, so they pick this up the moment it lands. Tag
-the last commit before the change and pin them to that tag instead — worth doing
-regardless, since `@main` means every caller inherits every future edit the
-minute it is pushed:
-
-```
-git tag v1 <the commit before this change> && git push origin v1
-```
-
-```yaml
-uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@v1
-```
-
-To move a caller to the general version, spell out what used to be implicit:
-
-```yaml
-with:
-  app_id: "1158310"
-  content_dir: mod
-  preview_file: mod/thumbnail.png
-  version_file: mod/descriptor.mod
-```
-
-**Every repository now needs a changelog.** The change note used to be built
-from commit subjects; it is now the `## <version>` section of `CHANGELOG.md`,
-and a release whose version has no section fails validation instead of
-publishing. Write the section for the version you are about to release before
-you bump it — a pull request that bumps the version is checked too, so the gap
-shows up before the merge rather than after it.
-
-Behaviour changes beyond that, all of them in the caller's favour:
-
-- A release is now detected across a whole push rather than against the previous
-  commit alone. A push whose version bump is not the tip commit used to be
-  missed, and published nothing.
-- Only the default branch publishes, checked by the workflow itself.
-- Uploads for one item queue instead of running at once.
-- `preview_file` may be omitted, which leaves the item's existing image alone.
-- The metadata folder is `workshop_dir` and no longer hardcoded.
-- `release_on: tag` and the `mode` override are new.
-- An optional `DISCORD_WEBHOOK_URL` secret announces each release, as a
-  full-width message by default or as an embed with `discord_format: embed`.
-
-The repository name is cosmetic — callers reference the workflow by path, so
-renaming it would only break existing `uses:` lines, never any behaviour.
 
 ## Self-test
 

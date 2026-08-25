@@ -1,1 +1,1 @@
-ck3-mod-ci Selbsttest
+steam-workshop-ci Selbsttest
