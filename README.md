@@ -1,14 +1,14 @@
-# ck3-mod-ci
+# steam-workshop-ci
 
 A reusable GitHub Actions workflow that publishes a Steam Workshop item from a
 git repository. Bump a version line, push, and the item updates. Do anything
 else and the Workshop is left alone.
 
-It was written for three Crusader Kings III mods and still carries that name,
-but nothing in the workflow knows what CK3 is. The game is an AppID you pass
-in, the version is a regex you choose, the folder that ships is a path. CK3 is
-the worked example throughout because it is the case that runs in production;
-every step below names the general rule next to it.
+It was written for three Crusader Kings III mods, but nothing in the workflow
+knows what CK3 is. The game is an AppID you pass in, the version is a regex
+you choose, the folder that ships is a path. CK3 is the worked example
+throughout because it is the case that runs in production; every step below
+names the general rule next to it.
 
 ## What happens when
 
@@ -117,7 +117,7 @@ on:
 
 jobs:
   ci:
-    uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@main
+    uses: JDeffner/steam-workshop-ci/.github/workflows/mod-ci.yml@main
     with:
       app_id: "1158310"
       content_dir: mod
@@ -575,7 +575,7 @@ git tag v1 <the commit before this change> && git push origin v1
 ```
 
 ```yaml
-uses: JDeffner/ck3-mod-ci/.github/workflows/mod-ci.yml@v1
+uses: JDeffner/steam-workshop-ci/.github/workflows/mod-ci.yml@v1
 ```
 
 To move a caller to the general version, spell out what used to be implicit:
@@ -608,8 +608,10 @@ Behaviour changes beyond that, all of them in the caller's favour:
 - An optional `DISCORD_WEBHOOK_URL` secret announces each release, as a
   full-width message by default or as an embed with `discord_format: embed`.
 
-The repository name is cosmetic — callers reference the workflow by path, so
-renaming it would only break existing `uses:` lines, never any behaviour.
+The repository used to be called `ck3-mod-ci`. GitHub redirects the old name,
+so existing `uses: JDeffner/ck3-mod-ci/...` lines keep working after the
+rename — but update them to `steam-workshop-ci` anyway, since the redirect
+only holds until someone claims the old name.
 
 ## Self-test
 
