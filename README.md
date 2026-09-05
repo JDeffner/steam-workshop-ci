@@ -129,9 +129,14 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 ```
 
-`app_id` and `content_dir` are the only required inputs. `version_pattern`
-already matches a Paradox descriptor, which is why the CK3 caller does not set
-it; `id_pattern` already matches `remote_file_id`.
+`app_id` is the only input you must set. `content_dir` defaults to `mod`, so
+set it when your content lives somewhere else. Everything else has a working
+default: `version_pattern` already matches a Paradox descriptor, which is why
+the CK3 caller does not set it, and `id_pattern` already matches
+`remote_file_id`.
+
+Leave `app_id` out and the run still starts. The first step then fails and
+prints the `with:` block you need.
 
 `secrets: inherit` works too and passes every secret the repository holds. Name
 the two explicitly when the repository holds others. A pull request from a fork
@@ -176,8 +181,8 @@ is published.` That line is a normal outcome, not a failure.
 
 | Input | Required | Default | What it is |
 |---|---|---|---|
-| `app_id` | yes | — | The Steam AppID that owns the item. |
-| `content_dir` | yes | — | The folder uploaded to the Workshop, verbatim. |
+| `app_id` | yes | *(none)* | The Steam AppID that owns the item. Digits only. The first step fails when it is empty. |
+| `content_dir` | no | `mod` | The folder uploaded to the Workshop, verbatim. |
 | `workshop_dir` | no | `workshop` | Where `item.json`, `description.bbcode` and the localized folders live. |
 | `preview_file` | no | *(none)* | The preview image, 1 MB maximum. Empty leaves the item's current image alone. |
 | `version_file` | no | *(none)* | The file holding the version line. Required when `release_on` is `version`. |
