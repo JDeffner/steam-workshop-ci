@@ -31,14 +31,20 @@ name: Steam Workshop CI
 on:
   workflow_call:
     inputs:
+      # Neither input is declared required. GitHub refuses to start a run
+      # whose caller omits a required input, and reports that as a workflow
+      # file issue with no job and no log. The "Check the caller's inputs"
+      # step below says what is missing instead.
       app_id:
         description: Steam AppID that owns the Workshop item. It is the number in the game's store page URL.
         type: string
-        required: true
+        required: false
+        default: ""
       content_dir:
         description: Folder uploaded to the Workshop, verbatim.
         type: string
-        required: true
+        required: false
+        default: mod
       workshop_dir:
         description: Folder holding item.json, description.bbcode and the localized listings.
         type: string
@@ -94,6 +100,37 @@ jobs:
       version: ${{ steps.decide.outputs.version }}
       changed: ${{ steps.decide.outputs.changed }}
     steps:
+      # First, before anything that needs a checkout: a caller with no `with:`
+      # block gets a job with a log instead of a run that never starts.
+      - name: Check the caller's inputs
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          CONTENT_DIR: ${{ inputs.content_dir }}
+        run: |
+          set -uo pipefail
+          fail=0
+          if [ -z "$APP_ID" ]; then
+            echo "::error::app_id is missing. It is the Steam AppID that owns the Workshop item, the number in the game's store page URL."
+            fail=1
+          elif ! printf '%s' "$APP_ID" | grep -Eq '^[0-9]+$'; then
+            echo "::error::app_id must be digits only, got \"$APP_ID\"."
+            fail=1
+          fi
+
+          if [ -z "$CONTENT_DIR" ]; then
+            echo "::error::content_dir is missing. It is the folder uploaded to the Workshop, verbatim."
+            fail=1
+          fi
+
+          if [ "$fail" = 1 ]; then
+            echo "::error::Give the caller workflow a with: block, next to uses:"
+            echo "::error::    with:"
+            echo "::error::      app_id: \"1158310\""
+            echo "::error::      content_dir: mod"
+            exit 1
+          fi
+          echo "ok: app_id $APP_ID, content_dir $CONTENT_DIR"
+
       # Full history: the release decision compares against the commit the push
       # started from, which is not always HEAD^, and tag releases need tags.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
